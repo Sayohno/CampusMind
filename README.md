@@ -1,15 +1,20 @@
-# CampusMind V1.1
+# CampusMind
 
-CampusMind 是一个面向高校学生**非临床支持场景**的 Risk-aware Multi-Agent 项目。它不是医疗诊断系统，而是用于学习与展示 Agent 工程能力的完整 Demo：通过 Intent / Risk 双轴理解、确定性 Policy、Multi-Agent 路由、受控 Tool Calling、Memory / SupportCaseState、Verified-resource RAG、Response Guard、Trace 和回归测试，把 LLM 的灵活性限制在可解释、可测试的工程边界内。
+CampusMind 是一个面向高校学生**非临床支持场景**的 Risk-aware Multi-Agent 系统。它不是医疗诊断系统，而是通过 Intent / Risk 双轴理解、确定性 Policy、多 Agent 路由、受控 Tool Calling、Memory / SupportCaseState、Verified-resource RAG、Response Guard、Trace 与回归测试，将 LLM 的灵活性限制在可解释、可测试的工程边界内。
 
-**V1.1 的基础设施升级重点是两项；V1.1.1 追加一个由真实 smoke test 暴露出的上下文路由修复：**
+## 当前实现
 
-1. **Redis State Backend**：Conversation Memory / SupportCaseState / Trace 可切换到 Redis，并通过 TTL 管理生命周期；
-2. **ChromaDB Vector RAG**：保留旧关键词检索基线，同时新增可持久化的 Chroma 向量检索后端；
-3. **Context-aware Follow-up Routing**：当当前消息没有明确新意图、且属于“继续刚才那个问题”这类 follow-up 时，IntentAnalyzer 才会使用 previous CaseState.topic / recent user memory 继承上一轮业务语义；显式新意图始终优先。
+1. **Redis State Backend**：Conversation Memory、SupportCaseState 与 Trace 使用 Redis 存储，并通过不同 TTL 管理生命周期；结合 Docker Volume，使容器重建后状态仍可恢复。
 
-> 项目定位：学习 / 作品集 / 实习面试 Demo。资源库仍是演示数据；不提供真实人工转介、报警、医疗诊断或真实学校联系方式。
+2. **ChromaDB Vector RAG**：保留统一 ResourceStore / Embedding 接口，将经过验证的校园资源写入 ChromaDB 向量检索后端，由 `search_verified_resources` Tool 返回 Top-K evidence；生成阶段要求基于检索证据回答，证据不足时不补全未经验证的具体事实。
 
+3. **Context-aware Follow-up Routing**：对于“继续刚才的问题”“那接下来呢”等缺少独立业务语义的 follow-up 请求，IntentAnalyzer 会结合 previous CaseState.topic 与 recent user memory 恢复上一轮业务语义；若当前消息包含明确新意图，则始终优先采用当前意图。
+
+4. **Risk-aware Agent Runtime**：基于 Intent / Risk 双轴分析和确定性 RiskPolicyEngine 控制 Agent、Tool Scope 与 mandatory actions；低风险场景保留模型在授权范围内的自主性，高风险场景由 Runtime 收紧权限并进入更确定性的处理路径。
+
+5. **Safety & Observability**：通过 Response Guard、Safe Fallback、Trace 和 Golden Cases 对最终输出、安全策略与执行链路进行校验，并记录 Intent、Risk、Agent、Tool、Guard、latency 等运行信息。
+
+> **项目定位：** 学习 / 作品集 / 实习面试 Demo。资源库仍为演示数据；不提供真实人工转介、报警、医疗诊断或真实学校联系方式。
 ## Highlights
 
 - **Risk-Adaptive Autonomy**：低风险保留模型灵活性，高风险由 PolicyEngine 收紧自主权并强制安全动作。
