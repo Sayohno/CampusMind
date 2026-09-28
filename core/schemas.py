@@ -207,3 +207,4 @@ class HealthResponse(BaseModel):
     llm_mode: str
     state_backend: str = "in_memory"
     trace_backend: str = "in_memory"
+    rag_backend: str = "keyword"

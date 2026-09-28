@@ -62,8 +62,18 @@ class AgentOrchestrator:
             limit=self.memory_limit,
         )
 
-        # 2) 结构化理解与确定性 Policy。
-        intent_result = self.intent_analyzer.analyze(request.message)
+        # 2) 先读取已有 CaseState，再做结构化理解。
+        #    对“继续刚才那个问题”这类语义不足的 follow-up，只注入最小必要上下文：
+        #    recent user memory + previous case topic。当前消息若有明确新意图，仍以当前消息为准。
+        previous_case = self.case_store.get(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+        )
+        intent_result = self.intent_analyzer.analyze(
+            request.message,
+            memory_history=memory_history,
+            case_topic=(previous_case.topic if previous_case is not None else None),
+        )
         risk_assessment = self.risk_analyzer.analyze(request.message)
         policy = self.policy_engine.decide(intent_result, risk_assessment)
 

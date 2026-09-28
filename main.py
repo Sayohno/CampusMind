@@ -1,7 +1,8 @@
 """CampusMind FastAPI 入口。
 
-正式服务主链：HTTP /chat -> Orchestrator -> Agent Runtime -> Guard -> Response。
-当前 Memory / CaseState / Trace 使用进程内存储，容器重启后会清空；这是当前 Demo 边界。
+V1.1：HTTP /chat -> Orchestrator -> Agent Runtime -> Guard -> Response，
+并支持 Redis 状态/Trace 后端与 Chroma Vector RAG。单元测试默认仍使用 in-memory + keyword，
+Docker Compose 默认启用 Redis + Chroma。
 """
 from __future__ import annotations
 
@@ -26,13 +27,16 @@ from core.schemas import (
     ToolTraceItem,
     TraceRecord,
 )
-from observability.trace_store import InMemoryTraceStore
-from rag.resource_store import VerifiedResourceStore
+from observability.factory import build_trace_store
+from observability.trace_store import TraceStore
+from rag.factory import build_resource_store
+from rag.resource_store import ResourceStore
 from safety.response_guard import ResponseGuard
-from state.case_store import CaseStore, InMemoryCaseStore
-from state.memory_store import ConversationMemory, InMemoryConversationMemory
+from state.case_store import CaseStore
+from state.factory import build_state_stores
+from state.memory_store import ConversationMemory
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "1.1.1"
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -47,17 +51,21 @@ def build_orchestrator(
     llm_client: BaseLLMClient | None = None,
     memory_store: ConversationMemory | None = None,
     case_store: CaseStore | None = None,
-    resource_store: VerifiedResourceStore | None = None,
+    resource_store: ResourceStore | None = None,
 ) -> AgentOrchestrator:
     """构建一套独立的 CampusMind Orchestrator。
 
-    默认使用 Settings() 的 static 模式，确保单元测试不会因为本机 .env=real 而误调真实 API。
-    FastAPI 正式启动时会显式传入 Settings.from_env()。
+    Settings() 默认 static + in_memory + keyword，确保单元测试完全离线。
+    FastAPI 正式启动时使用 Settings.from_env()；Docker Compose 默认覆盖为 Redis + Chroma。
     """
     settings = settings or Settings()
-    memory_store = memory_store or InMemoryConversationMemory()
-    case_store = case_store or InMemoryCaseStore()
-    resource_store = resource_store or VerifiedResourceStore.demo()
+
+    if memory_store is None or case_store is None:
+        default_memory, default_cases = build_state_stores(settings)
+        memory_store = memory_store or default_memory
+        case_store = case_store or default_cases
+    resource_store = resource_store or build_resource_store(settings)
+
     registry = build_default_tool_registry(
         case_store=case_store,
         resource_store=resource_store,
@@ -80,19 +88,19 @@ def create_app(
     *,
     settings: Settings | None = None,
     orchestrator: AgentOrchestrator | None = None,
-    trace_store: InMemoryTraceStore | None = None,
+    trace_store: TraceStore | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     orchestrator = orchestrator or build_orchestrator(settings)
-    trace_store = trace_store or InMemoryTraceStore()
+    trace_store = trace_store or build_trace_store(settings)
 
     app = FastAPI(
         title="CampusMind API",
         default_response_class=UTF8JSONResponse,
         version=APP_VERSION,
         description=(
-            "Risk-aware CampusMind Agent demo. "
-            "当前资源库、Memory、CaseState 与 Trace 均为演示/进程内实现。"
+            "Risk-aware CampusMind Agent demo. V1.1 支持 Redis state/trace backend 与 "
+            "Chroma Vector RAG；资源内容仍为演示知识库，不代表真实学校政策。"
         ),
     )
     app.state.settings = settings
@@ -104,6 +112,9 @@ def create_app(
         return HealthResponse(
             version=APP_VERSION,
             llm_mode=app.state.settings.llm_mode,
+            state_backend=app.state.settings.state_backend,
+            trace_backend=app.state.settings.trace_backend,
+            rag_backend=app.state.settings.rag_backend,
         )
 
     @app.post("/chat", response_model=ChatResponse, tags=["chat"])

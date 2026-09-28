@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: campusmind-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   campusmind:
     build:
       context: .
@@ -14,6 +26,25 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-60}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+
+      STATE_BACKEND: ${STATE_BACKEND:-redis}
+      TRACE_BACKEND: ${TRACE_BACKEND:-redis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MEMORY_TTL_SECONDS: ${MEMORY_TTL_SECONDS:-604800}
+      CASE_TTL_SECONDS: ${CASE_TTL_SECONDS:-2592000}
+      TRACE_TTL_SECONDS: ${TRACE_TTL_SECONDS:-604800}
+      TRACE_MAX_ITEMS: ${TRACE_MAX_ITEMS:-2000}
+
+      RAG_BACKEND: ${RAG_BACKEND:-chroma}
+      CHROMA_PERSIST_DIR: ${CHROMA_PERSIST_DIR:-/app/data/chroma}
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-campusmind_resources}
+      VECTOR_DIMENSIONS: ${VECTOR_DIMENSIONS:-384}
+      VECTOR_MIN_SCORE: ${VECTOR_MIN_SCORE:-0.12}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - chroma_data:/app/data/chroma
     ports:
       - "8000:8000"
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -28,4 +59,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      start_period: 10s
+
+volumes:
+  redis_data:
+  chroma_data:

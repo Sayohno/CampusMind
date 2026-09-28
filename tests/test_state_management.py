@@ -12,6 +12,7 @@ from core.schemas import (
     AgentRequest,
     CaseStatus,
     ChatRequest,
+    ConversationMessage,
     IntentResult,
     IntentType,
     LLMResponse,
@@ -108,6 +109,92 @@ class StateLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.case_state.current_risk_level, RiskLevel.HIGH)
         self.assertEqual(result.case_state.status, CaseStatus.ESCALATED)
         self.assertEqual(result.selected_agent, AgentName.ESCALATION)
+
+
+class ContextAwareIntentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ambiguous_followup_inherits_previous_resource_intent(self):
+        memory = InMemoryConversationMemory()
+        cases = InMemoryCaseStore()
+        orchestrator = build_orchestrator(
+            llm_client=StaticLLMClient("测试回复"),
+            memory_store=memory,
+            case_store=cases,
+        )
+
+        first = await orchestrator.handle(
+            ChatRequest(
+                user_id="follow_user",
+                conversation_id="follow_conv",
+                message="学校心理咨询中心怎么预约？",
+            )
+        )
+        second = await orchestrator.handle(
+            ChatRequest(
+                user_id="follow_user",
+                conversation_id="follow_conv",
+                message="我刚才问的事情继续说。",
+            )
+        )
+
+        self.assertEqual(first.intent_result.intent, IntentType.RESOURCE_QUERY)
+        self.assertEqual(second.intent_result.intent, IntentType.RESOURCE_QUERY)
+        self.assertEqual(second.selected_agent, AgentName.RESOURCE)
+        self.assertEqual(second.case_state.topic, IntentType.RESOURCE_QUERY.value)
+
+    async def test_explicit_new_intent_overrides_previous_case_topic(self):
+        memory = InMemoryConversationMemory()
+        cases = InMemoryCaseStore()
+        orchestrator = build_orchestrator(
+            llm_client=StaticLLMClient("测试回复"),
+            memory_store=memory,
+            case_store=cases,
+        )
+
+        await orchestrator.handle(
+            ChatRequest(
+                user_id="switch_user",
+                conversation_id="switch_conv",
+                message="学校心理咨询中心怎么预约？",
+            )
+        )
+        second = await orchestrator.handle(
+            ChatRequest(
+                user_id="switch_user",
+                conversation_id="switch_conv",
+                message="那先不聊这个了，秋招怎么准备？",
+            )
+        )
+
+        self.assertEqual(second.intent_result.intent, IntentType.ACADEMIC_CAREER)
+        self.assertEqual(second.selected_agent, AgentName.GUIDANCE)
+
+    async def test_followup_without_previous_context_remains_general(self):
+        orchestrator = build_orchestrator(llm_client=StaticLLMClient("测试回复"))
+        result = await orchestrator.handle(
+            ChatRequest(
+                user_id="new_user",
+                conversation_id="new_conv",
+                message="那接下来呢？",
+            )
+        )
+
+        self.assertEqual(result.intent_result.intent, IntentType.GENERAL)
+        self.assertEqual(result.selected_agent, AgentName.GENERAL)
+
+    async def test_intent_analyzer_can_fallback_to_recent_user_memory(self):
+        analyzer = IntentAnalyzer()
+        history = [
+            ConversationMessage(role="user", content="秋招怎么准备？"),
+            ConversationMessage(role="assistant", content="可以先明确目标岗位。"),
+        ]
+        result = analyzer.analyze(
+            "继续刚才那个问题。",
+            memory_history=history,
+            case_topic=None,
+        )
+
+        self.assertEqual(result.intent, IntentType.ACADEMIC_CAREER)
+
 
 
 class CaseToolTests(unittest.IsolatedAsyncioTestCase):

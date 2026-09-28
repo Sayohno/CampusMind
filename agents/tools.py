@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from core.schemas import AgentRequest, CaseStatus, SupportCaseState, utc_now
-from rag.resource_store import VerifiedResourceStore
+from rag.resource_store import ResourceStore, VerifiedResourceStore
 from state.case_store import CaseStore
 
 
@@ -185,7 +185,7 @@ def inspect_request_context(
 def build_default_tool_registry(
     *,
     case_store: CaseStore,
-    resource_store: VerifiedResourceStore | None = None,
+    resource_store: ResourceStore | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     resource_store = resource_store or VerifiedResourceStore.demo()
