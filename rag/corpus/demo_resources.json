@@ -1,0 +1,26 @@
+[
+  {
+    "resource_id": "demo_counseling_access",
+    "title": "校园心理支持资源使用说明（演示知识库）",
+    "content": "当前 CampusMind 演示知识库不包含任何真实学校的具体地址、电话、开放时间或预约链接。用户询问具体校园心理支持资源时，只能说明当前资料无法确认，并建议以所在学校官网、学生工作部门或学校正式发布渠道为准。",
+    "keywords": ["心理咨询", "咨询中心", "心理支持", "预约", "开放时间", "地址", "电话", "学校官网"],
+    "source_ref": "demo://campus-support/counseling-access",
+    "verified": true
+  },
+  {
+    "resource_id": "demo_career_support",
+    "title": "校园就业支持资源说明（演示知识库）",
+    "content": "CampusMind 演示库只确认：校园就业支持类资源可以包括就业指导、招聘信息、简历与求职支持等类别。具体招聘会场次、岗位、地点、日期和联系方式必须以学校官方发布信息为准，系统不得自行补充。",
+    "keywords": ["就业", "秋招", "招聘会", "简历", "求职", "就业中心", "岗位"],
+    "source_ref": "demo://campus-support/career",
+    "verified": true
+  },
+  {
+    "resource_id": "demo_high_risk_boundary",
+    "title": "高风险支持路径能力边界（演示知识库）",
+    "content": "当前 CampusMind Demo 没有真实人工转介、报警、医疗或危机热线联动能力。高风险路径不得声称已经联系任何机构或人员；应保持受控回复，鼓励用户联系现实中的可信赖人士、学校正式支持渠道或当地紧急服务。任何具体电话号码、地址或服务时间都必须来自经过验证的外部来源。",
+    "keywords": ["撑不下去", "立刻找人", "高风险", "人工支持", "紧急", "转介", "危机"],
+    "source_ref": "demo://safety/high-risk-boundary",
+    "verified": true
+  }
+]

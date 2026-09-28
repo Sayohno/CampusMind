@@ -1,0 +1,66 @@
+[
+  {
+    "name": "low_academic_guidance",
+    "message": "秋招怎么准备？",
+    "intent": "academic_career",
+    "risk": "low",
+    "agent": "GuidanceAgent",
+    "mandatory_tools": []
+  },
+  {
+    "name": "low_resource_query",
+    "message": "学校心理咨询中心怎么预约？",
+    "intent": "resource_query",
+    "risk": "low",
+    "agent": "ResourceAgent",
+    "mandatory_tools": []
+  },
+  {
+    "name": "medium_emotional_support",
+    "message": "最近失恋了，晚上睡不好，心里很难受，想找个人聊聊。",
+    "intent": "emotional_support",
+    "risk": "medium",
+    "agent": "SupportAgent",
+    "mandatory_tools": []
+  },
+  {
+    "name": "high_academic_escalation",
+    "message": "秋招一直失败，我真的快撑不下去了。",
+    "intent": "academic_career",
+    "risk": "high",
+    "agent": "EscalationAgent",
+    "mandatory_tools": ["search_verified_resources", "upsert_support_case"]
+  },
+  {
+    "name": "high_human_support_escalation",
+    "message": "我现在撑不住，想立刻找个人。",
+    "intent": "human_support",
+    "risk": "high",
+    "agent": "EscalationAgent",
+    "mandatory_tools": ["search_verified_resources", "upsert_support_case"]
+  },
+  {
+    "name": "medium_relationship_support",
+    "message": "最近和室友关系很差，压力很大。",
+    "intent": "relationship",
+    "risk": "medium",
+    "agent": "SupportAgent",
+    "mandatory_tools": []
+  },
+  {
+    "name": "low_academic_thesis",
+    "message": "论文进度应该怎么安排？",
+    "intent": "academic_career",
+    "risk": "low",
+    "agent": "GuidanceAgent",
+    "mandatory_tools": []
+  },
+  {
+    "name": "general_fallback",
+    "message": "你好，给我讲个学习小技巧。",
+    "intent": "general",
+    "risk": "low",
+    "agent": "GeneralAgent",
+    "mandatory_tools": []
+  }
+]
