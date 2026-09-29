@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CampusMind Agent Demo</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Microsoft YaHei", Arial, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f6f8; color: #18212f; }
+    button, textarea, input { font: inherit; }
+    .app { min-height: 100vh; display: flex; flex-direction: column; }
+    header { background: #fff; border-bottom: 1px solid #e6e9ee; padding: 18px 24px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    header h1 { margin: 0; font-size: 22px; }
+    header p { margin: 5px 0 0; color:#687386; font-size:13px; }
+    .badge { background:#eef4ff; color:#315fb5; border:1px solid #d8e5ff; padding:6px 10px; border-radius:999px; font-size:12px; white-space:nowrap; }
+    main { width: min(1280px, calc(100% - 28px)); margin: 18px auto; display:grid; grid-template-columns:minmax(0, 1fr) 340px; gap:16px; flex:1; }
+    .panel { background:#fff; border:1px solid #e5e9ef; border-radius:14px; box-shadow:0 6px 22px rgba(20,35,60,.05); }
+    .chat { min-height:720px; display:flex; flex-direction:column; overflow:hidden; }
+    .config { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:14px 16px; border-bottom:1px solid #edf0f4; }
+    label { font-size:12px; color:#687386; display:block; margin-bottom:5px; }
+    input, textarea { width:100%; border:1px solid #d7dde6; border-radius:9px; padding:9px 11px; outline:none; background:#fff; }
+    input:focus, textarea:focus { border-color:#6b8fd8; box-shadow:0 0 0 3px rgba(71,111,191,.1); }
+    .messages { flex:1; overflow:auto; padding:20px; display:flex; flex-direction:column; gap:14px; }
+    .msg { max-width:82%; padding:12px 14px; border-radius:13px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
+    .msg.user { align-self:flex-end; background:#315fb5; color:white; border-bottom-right-radius:4px; }
+    .msg.assistant { align-self:flex-start; background:#f0f3f7; border-bottom-left-radius:4px; }
+    .composer { padding:14px 16px 16px; border-top:1px solid #edf0f4; }
+    .examples { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:10px; }
+    .chip { border:1px solid #dfe4eb; background:#fff; color:#4d596b; border-radius:999px; padding:6px 10px; cursor:pointer; font-size:12px; }
+    .chip:hover { background:#f4f7fb; }
+    textarea { min-height:78px; resize:vertical; }
+    .actions { margin-top:9px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .hint { font-size:12px; color:#7a8494; }
+    .send { border:0; background:#315fb5; color:white; padding:9px 18px; border-radius:9px; cursor:pointer; font-weight:600; }
+    .send:disabled { opacity:.5; cursor:not-allowed; }
+    .side { padding:16px; height:max-content; position:sticky; top:16px; }
+    .side h2 { margin:0 0 12px; font-size:17px; }
+    .stage { margin-bottom:13px; padding:10px 11px; background:#f6f8fb; border-radius:9px; font-size:13px; color:#536072; }
+    .grid { display:grid; grid-template-columns:110px 1fr; gap:8px; font-size:13px; margin-bottom:16px; }
+    .key { color:#7a8494; }
+    .value { font-weight:600; word-break:break-word; }
+    .tools { display:flex; flex-wrap:wrap; gap:6px; }
+    .tool { background:#edf7f1; color:#286442; border:1px solid #d6ebdf; border-radius:6px; padding:3px 7px; font-size:11px; }
+    .case { background:#f7f8fa; padding:10px; border-radius:8px; font-family:Consolas, monospace; font-size:11px; white-space:pre-wrap; overflow:auto; max-height:260px; }
+    .notice { margin-top:13px; font-size:11px; line-height:1.55; color:#7a8494; border-top:1px solid #edf0f4; padding-top:12px; }
+    .ok { color:#23814d; }
+    .bad { color:#b33a3a; }
+    @media (max-width: 900px) { main { grid-template-columns:1fr; } .side { position:static; } .chat { min-height:620px; } }
+    @media (max-width: 560px) { header { padding:14px; } main { width:calc(100% - 16px); margin:8px auto; } .config { grid-template-columns:1fr; } .msg { max-width:94%; } }
+  </style>
+</head>
+<body>
+<div id="app" class="app">
+  <header>
+    <div>
+      <h1>CampusMind Agent Demo</h1>
+      <p>Risk-aware Multi-Agent · Redis State · Chroma Vector RAG · SSE Event Stream</p>
+    </div>
+    <div class="badge">Vue 3 · Thin UI</div>
+  </header>
+
+  <main>
+    <section class="panel chat">
+      <div class="config">
+        <div>
+          <label>User ID</label>
+          <input v-model="userId" />
+        </div>
+        <div>
+          <label>Conversation ID</label>
+          <input v-model="conversationId" />
+        </div>
+      </div>
+
+      <div class="messages" ref="messagesEl">
+        <div v-if="messages.length === 0" class="hint">选择一个示例，或输入你的测试问题。</div>
+        <div v-for="(item, index) in messages" :key="index" class="msg" :class="item.role">
+          {{ item.content }}<span v-if="item.streaming" class="hint"> ▍</span>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="examples">
+          <button class="chip" @click="message='秋招怎么准备？'">秋招建议</button>
+          <button class="chip" @click="message='学校心理咨询中心怎么预约？'">校园资源</button>
+          <button class="chip" @click="message='最近失恋了，心里很难受，想找个人聊聊。'">情绪支持</button>
+          <button class="chip" @click="message='我刚才问的事情继续说。'">上下文续问</button>
+        </div>
+        <textarea v-model="message" @keydown.ctrl.enter.prevent="send" placeholder="输入消息；Ctrl + Enter 发送"></textarea>
+        <div class="actions">
+          <span class="hint">SSE 使用 POST + fetch stream；不是 EventSource GET。</span>
+          <button class="send" :disabled="sending || !message.trim()" @click="send">{{ sending ? '处理中…' : '发送' }}</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel side">
+      <h2>Agent Trace</h2>
+      <div class="stage">{{ stage || '等待请求' }}</div>
+      <div class="grid">
+        <div class="key">Request ID</div><div class="value">{{ meta.request_id || '-' }}</div>
+        <div class="key">Intent</div><div class="value">{{ meta.intent || '-' }}</div>
+        <div class="key">Risk</div><div class="value">{{ meta.risk || '-' }}</div>
+        <div class="key">Agent</div><div class="value">{{ meta.selected_agent || '-' }}</div>
+        <div class="key">Guard</div>
+        <div class="value" :class="meta.guard_passed === true ? 'ok' : (meta.guard_passed === false ? 'bad' : '')">
+          {{ meta.guard_passed === true ? 'PASS' : (meta.guard_passed === false ? 'BLOCKED' : '-') }}
+        </div>
+        <div class="key">Latency</div><div class="value">{{ meta.latency_ms ? meta.latency_ms + ' ms' : '-' }}</div>
+        <div class="key">Tools</div>
+        <div class="tools">
+          <span v-if="!meta.tools_used || !meta.tools_used.length">-</span>
+          <span v-for="tool in (meta.tools_used || [])" :key="tool" class="tool">{{ tool }}</span>
+        </div>
+      </div>
+      <h2>CaseState</h2>
+      <div class="case">{{ caseText }}</div>
+      <div class="notice">
+        当前页面仅用于学习与作品集展示。校园资源为演示数据，不提供真实医疗诊断、人工转介、报警或未经核验的学校联系方式。<br/><br/>
+        当前 SSE 是真实事件流，但回答文本是在 Agent Runtime 完成后分块发送；不要把它描述成模型原始 token-level streaming。
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script>
+const { createApp, nextTick } = Vue;
+
+createApp({
+  data() {
+    return {
+      userId: 'demo_user',
+      conversationId: 'demo_conv',
+      message: '',
+      messages: [],
+      sending: false,
+      stage: '',
+      meta: {},
+      caseState: null,
+    };
+  },
+  computed: {
+    caseText() {
+      return this.caseState ? JSON.stringify(this.caseState, null, 2) : '-';
+    },
+  },
+  methods: {
+    async scrollBottom() {
+      await nextTick();
+      const el = this.$refs.messagesEl;
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+    parseEvent(raw) {
+      let event = 'message';
+      const dataLines = [];
+      for (const line of raw.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }
+      if (!dataLines.length) return null;
+      return { event, data: JSON.parse(dataLines.join('\n')) };
+    },
+    handleEvent(event, data, assistantIndex) {
+      if (event === 'accepted') {
+        this.meta = { request_id: data.request_id };
+        this.stage = '请求已接收';
+      } else if (event === 'stage') {
+        this.stage = data.label || data.name;
+      } else if (event === 'meta') {
+        this.meta = data;
+        this.stage = 'Agent Runtime 完成，正在发送回答';
+      } else if (event === 'chunk') {
+        this.messages[assistantIndex].content += data.text || '';
+        this.scrollBottom();
+      } else if (event === 'done') {
+        this.caseState = data.case_state || null;
+        this.stage = '完成';
+      } else if (event === 'error') {
+        this.messages[assistantIndex].content = data.message || '请求失败';
+        this.stage = '失败';
+      }
+    },
+    async send() {
+      const text = this.message.trim();
+      if (!text || this.sending) return;
+
+      this.sending = true;
+      this.stage = '正在建立 SSE 流';
+      this.meta = {};
+      this.caseState = null;
+      this.messages.push({ role: 'user', content: text });
+      this.messages.push({ role: 'assistant', content: '', streaming: true });
+      const assistantIndex = this.messages.length - 1;
+      this.message = '';
+      await this.scrollBottom();
+
+      try {
+        const response = await fetch('/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: this.userId.trim() || 'demo_user',
+            conversation_id: this.conversationId.trim() || 'demo_conv',
+            message: text,
+          }),
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const blocks = buffer.split('\n\n');
+          buffer = blocks.pop() || '';
+          for (const block of blocks) {
+            if (!block.trim()) continue;
+            const parsed = this.parseEvent(block);
+            if (parsed) this.handleEvent(parsed.event, parsed.data, assistantIndex);
+          }
+        }
+
+        if (buffer.trim()) {
+          const parsed = this.parseEvent(buffer);
+          if (parsed) this.handleEvent(parsed.event, parsed.data, assistantIndex);
+        }
+      } catch (error) {
+        this.messages[assistantIndex].content = `请求失败：${error.message}`;
+        this.stage = '失败';
+      } finally {
+        this.messages[assistantIndex].streaming = false;
+        this.sending = false;
+        await this.scrollBottom();
+      }
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

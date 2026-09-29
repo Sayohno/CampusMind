@@ -1,16 +1,23 @@
 """CampusMind FastAPI 入口。
 
-V1.1：HTTP /chat -> Orchestrator -> Agent Runtime -> Guard -> Response，
-并支持 Redis 状态/Trace 后端与 Chroma Vector RAG。单元测试默认仍使用 in-memory + keyword，
-Docker Compose 默认启用 Redis + Chroma。
+当前版本：HTTP /chat + SSE /chat/stream -> Orchestrator -> Agent Runtime -> Guard -> Response，
+并支持 Redis 状态/Trace 后端、Chroma Vector RAG 与极薄 Vue Demo。
+
+说明：/chat/stream 提供真实 SSE 事件流和增量 UI 渲染，但当前 LLMClient 仍使用非流式
+Chat Completions。也就是说，Agent 完整结果产生后再分块发送 response；不要把它描述成
+“模型 token-level streaming”。这样保留 Runtime / Tool Calling 的现有确定性边界，同时让
+前端具备 Agent 事件流展示能力。
 """
 from __future__ import annotations
 
+import asyncio
+import json
+from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from agents.agent_orchestrator import AgentOrchestrator, Router
 from agents.factory import build_agents
@@ -36,7 +43,8 @@ from state.case_store import CaseStore
 from state.factory import build_state_stores
 from state.memory_store import ConversationMemory
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
+WEB_DIR = Path(__file__).resolve().parent / "web"
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -84,6 +92,65 @@ def build_orchestrator(
     )
 
 
+def _tool_trace_items(result) -> list[ToolTraceItem]:
+    return [
+        ToolTraceItem(
+            name=item.name,
+            source=item.source,
+            status=item.status,
+            argument_keys=sorted(item.arguments.keys()),
+            error=item.error,
+        )
+        for item in result.agent_result.tool_executions
+    ]
+
+
+def _trace_record(request_id: str, result, latency_ms: float) -> TraceRecord:
+    guard = result.agent_result.guard_result
+    return TraceRecord(
+        request_id=request_id,
+        status="success",
+        intent=result.intent_result.intent,
+        risk=result.risk_assessment.risk_level,
+        allowed_agent=result.policy_decision.allowed_agent,
+        selected_agent=result.selected_agent,
+        tool_executions=_tool_trace_items(result),
+        guard_passed=(guard.passed if guard is not None else None),
+        guard_violations=(guard.violations if guard is not None else []),
+        safe_fallback_used=result.agent_result.safe_fallback_used,
+        memory_size=result.memory_size,
+        case_status=result.case_state.status,
+        latency_ms=latency_ms,
+    )
+
+
+def _chat_response(request_id: str, result) -> ChatResponse:
+    guard = result.agent_result.guard_result
+    return ChatResponse(
+        request_id=request_id,
+        response=result.agent_result.response,
+        intent=result.intent_result.intent,
+        risk=result.risk_assessment.risk_level,
+        selected_agent=result.selected_agent,
+        tools_used=result.agent_result.tools_used,
+        guard_passed=(guard.passed if guard is not None else None),
+        guard_violations=(guard.violations if guard is not None else []),
+        safe_fallback_used=result.agent_result.safe_fallback_used,
+        case_state=result.case_state,
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    """编码一个 SSE event。data 始终为单行 JSON，避免多行解析歧义。"""
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _chunks(text: str, size: int = 18):
+    for index in range(0, len(text), size):
+        yield text[index : index + size]
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -99,13 +166,25 @@ def create_app(
         default_response_class=UTF8JSONResponse,
         version=APP_VERSION,
         description=(
-            "Risk-aware CampusMind Agent demo. V1.1 支持 Redis state/trace backend 与 "
-            "Chroma Vector RAG；资源内容仍为演示知识库，不代表真实学校政策。"
+            "Risk-aware CampusMind Agent demo：Redis state/trace、Chroma Vector RAG、"
+            "Context-aware Follow-up，以及 SSE Agent event stream + Vue Demo。"
+            "资源内容仍为演示知识库，不代表真实学校政策。"
         ),
     )
     app.state.settings = settings
     app.state.orchestrator = orchestrator
     app.state.trace_store = trace_store
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return RedirectResponse(url="/demo")
+
+    @app.get("/demo", response_class=HTMLResponse, include_in_schema=False)
+    async def demo() -> HTMLResponse:
+        page = WEB_DIR / "index.html"
+        if not page.exists():
+            raise HTTPException(status_code=404, detail="Demo UI not found")
+        return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
@@ -144,45 +223,88 @@ def create_app(
             ) from exc
 
         latency_ms = (perf_counter() - started) * 1000
-        guard = result.agent_result.guard_result
-        tool_trace = [
-            ToolTraceItem(
-                name=item.name,
-                source=item.source,
-                status=item.status,
-                argument_keys=sorted(item.arguments.keys()),
-                error=item.error,
-            )
-            for item in result.agent_result.tool_executions
-        ]
-        trace = TraceRecord(
-            request_id=request_id,
-            status="success",
-            intent=result.intent_result.intent,
-            risk=result.risk_assessment.risk_level,
-            allowed_agent=result.policy_decision.allowed_agent,
-            selected_agent=result.selected_agent,
-            tool_executions=tool_trace,
-            guard_passed=(guard.passed if guard is not None else None),
-            guard_violations=(guard.violations if guard is not None else []),
-            safe_fallback_used=result.agent_result.safe_fallback_used,
-            memory_size=result.memory_size,
-            case_status=result.case_state.status,
-            latency_ms=latency_ms,
-        )
-        app.state.trace_store.save(trace)
+        app.state.trace_store.save(_trace_record(request_id, result, latency_ms))
+        return _chat_response(request_id, result)
 
-        return ChatResponse(
-            request_id=request_id,
-            response=result.agent_result.response,
-            intent=result.intent_result.intent,
-            risk=result.risk_assessment.risk_level,
-            selected_agent=result.selected_agent,
-            tools_used=result.agent_result.tools_used,
-            guard_passed=(guard.passed if guard is not None else None),
-            guard_violations=(guard.violations if guard is not None else []),
-            safe_fallback_used=result.agent_result.safe_fallback_used,
-            case_state=result.case_state,
+    @app.post("/chat/stream", tags=["chat"])
+    async def chat_stream(request: ChatRequest) -> StreamingResponse:
+        """SSE Agent event stream。
+
+        当前语义：先发送 accepted / stage；Orchestrator 完成后发送 meta，随后将最终允许发送的
+        response 按 chunk 增量推给前端，最后 done。它是真实 SSE，但不是 LLM token-level stream。
+        """
+        request_id = f"req_{uuid4().hex}"
+
+        async def event_generator():
+            started = perf_counter()
+            yield _sse("accepted", {"request_id": request_id})
+            yield _sse("stage", {"name": "orchestrating", "label": "Intent / Risk / Policy / Agent Runtime"})
+            await asyncio.sleep(0)
+
+            try:
+                result = await app.state.orchestrator.handle(request)
+            except Exception as exc:
+                latency_ms = (perf_counter() - started) * 1000
+                app.state.trace_store.save(
+                    TraceRecord(
+                        request_id=request_id,
+                        status="error",
+                        latency_ms=latency_ms,
+                        error_type=exc.__class__.__name__,
+                        error=str(exc)[:500],
+                    )
+                )
+                yield _sse(
+                    "error",
+                    {
+                        "request_id": request_id,
+                        "message": "CampusMind 请求处理失败，请通过 request_id 查询 Trace。",
+                        "error_type": exc.__class__.__name__,
+                    },
+                )
+                return
+
+            latency_ms = (perf_counter() - started) * 1000
+            app.state.trace_store.save(_trace_record(request_id, result, latency_ms))
+            response = _chat_response(request_id, result)
+
+            yield _sse(
+                "meta",
+                {
+                    "request_id": request_id,
+                    "intent": response.intent.value,
+                    "risk": response.risk.value,
+                    "selected_agent": response.selected_agent.value,
+                    "tools_used": response.tools_used,
+                    "guard_passed": response.guard_passed,
+                    "guard_violations": response.guard_violations,
+                    "safe_fallback_used": response.safe_fallback_used,
+                    "latency_ms": round(latency_ms, 2),
+                },
+            )
+
+            # 这里是“最终回答分块 SSE”，不是模型原始 token stream。
+            for chunk in _chunks(response.response):
+                yield _sse("chunk", {"text": chunk})
+                await asyncio.sleep(0)
+
+            yield _sse(
+                "done",
+                {
+                    "request_id": request_id,
+                    "case_state": response.case_state.model_dump(mode="json"),
+                    "trace_url": f"/traces/{request_id}",
+                },
+            )
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     @app.get("/traces/{request_id}", response_model=TraceRecord, tags=["observability"])
