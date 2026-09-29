@@ -2,20 +2,18 @@
 
 这里只进行系统内部工程风险分级，不进行医疗诊断。
 
-RiskAnalyzer 本身仍然是确定性规则模块。
+RiskAnalyzer 负责 deterministic fast path：
+- 明确风险表达直接识别；
+- 区分用户本人表达与论文、小说、程序、活动等讨论语境；
+- 识别部分功能受损信号；
+- 对存在歧义的情况交给上层 SemanticAnalyzer 做语义消歧。
 
-当规则检测到：
-- 潜在 high-risk 但上下文存在歧义；
-- 风险词出现在论文 / 小说 / 程序 / 活动等 meta context；
-- 存在功能影响但固定风险词不足；
-
-可以通过 needs_semantic_fallback() 告诉上层：
-当前结果值得再交给 SemanticAnalyzer 做语义消歧。
-
-最终 Agent、mandatory tools 和 escalation policy
-仍然由 RiskPolicyEngine 决定。
+最终 Agent 路由、Tool 权限和高风险升级策略仍由
+RiskPolicyEngine / Runtime 决定。
 """
 from __future__ import annotations
+
+import re
 
 from core.schemas import RiskAssessment, RiskLevel
 
@@ -33,11 +31,10 @@ class RiskAnalyzer:
         "活不下去",
     )
 
-    # 隐式但需要高度关注的表达。
+    # 隐式高风险表达。
     #
-    # 注意：
-    # 不能把单独的“消失”直接视为 high，
-    # 因为“文件消失了”完全不是风险表达。
+    # 这些词不能单独机械判断。
+    # 例如“文件消失了”显然不是风险表达。
     _indirect_high_signals = (
         "从这个世界消失",
         "彻底消失",
@@ -46,7 +43,7 @@ class RiskAnalyzer:
         "不用再醒来",
     )
 
-    # 中等级明显困扰信号。
+    # 中风险困扰信号。
     _medium_signals = (
         "焦虑",
         "睡不着",
@@ -63,11 +60,7 @@ class RiskAnalyzer:
         "胸口堵",
     )
 
-    # 功能影响类信号。
-    #
-    # 单独出现时不一定直接代表 medium，
-    # 但多个一起出现，或者明确影响学习 / 工作 / 睡眠，
-    # 就值得提高风险等级。
+    # 功能受损相关信号。
     _functional_signals = (
         "状态很差",
         "白天也没精神",
@@ -82,13 +75,8 @@ class RiskAnalyzer:
         "一个人扛着",
     )
 
-    # 风险相关词可能只是被讨论的对象，
+    # 说明风险词可能只是“被讨论对象”，
     # 而不是用户本人正在表达风险。
-    #
-    # 例如：
-    # “自杀预防宣传周在哪里报名？”
-    # “小说人物说‘我不想活了’，怎么翻译？”
-    # “检测‘伤害自己’关键词的程序怎么写？”
     _meta_context_markers = (
         "论文",
         "论文题目",
@@ -113,14 +101,13 @@ class RiskAnalyzer:
         "题目",
     )
 
-    # 较强的“用户本人正在经历困扰”表达。
+    # 明显的个人困扰语境。
     #
-    # 不使用单独的“我”或“自己”做判断，
-    # 否则：
+    # 这里不能只判断有没有“我”，因为：
     #
-    # “我在写检测‘伤害自己’关键词的程序”
+    # “我在做一个检测‘伤害自己’关键词的程序”
     #
-    # 会被错误识别成个人风险表达。
+    # 虽然有“我”，但并不是用户本人风险表达。
     _personal_distress_markers = (
         "我最近",
         "我这几天",
@@ -129,6 +116,7 @@ class RiskAnalyzer:
         "我开始觉得",
         "我真的",
         "我已经",
+        "我觉得自己",
         "最近我",
         "这几天我",
         "让我很",
@@ -139,14 +127,13 @@ class RiskAnalyzer:
         "我撑不住",
         "我撑不下去",
         "我活不下去",
+        "自己不想活",
+        "自己想死",
+        "自己活不下去",
+        "自己撑不住",
     )
 
-    # 某些隐式 high-risk 表达会同时描述：
-    #
-    # “如果消失了会不会更轻松 / 解脱”
-    #
-    # 这些词不是独立风险词，
-    # 只有和 indirect high signal 组合才有意义。
+    # 隐式 high-risk 中常见的“解脱结果期待”。
     _relief_markers = (
         "更轻松",
         "能解脱",
@@ -161,19 +148,39 @@ class RiskAnalyzer:
     ) -> RiskAssessment:
         text = message.strip().lower()
 
-        # 1) 判断是否存在明显 meta context。
+        # 引号中的内容可能只是：
         #
-        # 如果只是在论文 / 小说 / 程序 / 宣传等语境中讨论风险词，
-        # 并且没有明显个人困扰证据，
-        # 确定性规则暂时按 LOW 处理。
+        # 小说台词
+        # 翻译内容
+        # 文章引用
+        # 被检测的关键词
         #
-        # 后续 needs_semantic_fallback() 会判断是否还需要 LLM 消歧。
+        # deterministic fast path 不把这些内容
+        # 直接当成用户本人风险表达。
+        #
+        # 原始 text 仍然保留，
+        # 后面的 needs_semantic_fallback() 会用完整文本做消歧判断。
+        risk_text = self._remove_quoted_text(text)
+
+        # 1) 判断是否属于论文 / 小说 / 程序 / 活动等 meta context。
         meta_context = self._is_meta_context(text)
 
-        personal_distress = (
-            self._has_personal_distress(text)
+        # personal distress 只在去除引用后的正文上判断。
+        personal_distress = self._has_personal_distress(
+            risk_text
         )
 
+        # 如果明显属于讨论 / 引用 / 研究语境，
+        # 并且正文里没有个人困扰信号，
+        # deterministic fast path 暂时按 LOW。
+        #
+        # 例如：
+        #
+        # “自杀预防宣传周在哪里报名？”
+        #
+        # “小说人物说‘我不想活了’，怎么翻译？”
+        #
+        # “检测‘伤害自己’关键词的程序怎么写？”
         if (
             meta_context
             and not personal_distress
@@ -187,10 +194,13 @@ class RiskAnalyzer:
             )
 
         # 2) 明确 high-risk。
+        #
+        # 注意这里扫描的是 risk_text，
+        # 即已经去掉引用内容后的用户正文。
         high_hits = [
             signal
             for signal in self._high_signals
-            if signal in text
+            if signal in risk_text
         ]
 
         if high_hits:
@@ -205,18 +215,10 @@ class RiskAnalyzer:
             )
 
         # 3) 隐式 high-risk。
-        #
-        # 需要：
-        #
-        # indirect high expression
-        # +
-        # personal distress context
-        #
-        # 才判 high。
         indirect_high_hits = [
             signal
             for signal in self._indirect_high_signals
-            if signal in text
+            if signal in risk_text
         ]
 
         if (
@@ -226,7 +228,7 @@ class RiskAnalyzer:
             relief_hits = [
                 marker
                 for marker in self._relief_markers
-                if marker in text
+                if marker in risk_text
             ]
 
             signals = (
@@ -248,7 +250,7 @@ class RiskAnalyzer:
         medium_hits = [
             signal
             for signal in self._medium_signals
-            if signal in text
+            if signal in risk_text
         ]
 
         if medium_hits:
@@ -266,11 +268,11 @@ class RiskAnalyzer:
         functional_hits = [
             signal
             for signal in self._functional_signals
-            if signal in text
+            if signal in risk_text
         ]
 
         has_explicit_impairment = any(
-            marker in text
+            marker in risk_text
             for marker in (
                 "影响到上课",
                 "影响上课",
@@ -281,8 +283,8 @@ class RiskAnalyzer:
         )
 
         # 两个及以上弱功能信号，
-        # 或一个明确“已经影响...”信号，
-        # 视为 medium。
+        # 或存在明确“已经影响...”表达，
+        # 判为 medium。
         if (
             len(functional_hits) >= 2
             or has_explicit_impairment
@@ -297,6 +299,7 @@ class RiskAnalyzer:
                 ),
             )
 
+        # 6) 没有足够风险证据。
         return RiskAssessment(
             risk_level=RiskLevel.LOW,
             signals=[],
@@ -308,16 +311,30 @@ class RiskAnalyzer:
         message: str,
         result: RiskAssessment,
     ) -> bool:
-        """判断当前 Risk 规则结果是否需要进一步做语义消歧。
+        """判断当前规则结果是否值得进一步做 LLM 语义消歧。
 
-        True 不代表确定性规则一定错误。
+        True 不代表规则一定错。
 
-        它只表示：
-        当前文本存在明显语境冲突、隐式风险或功能影响，
-        值得交给 SemanticAnalyzer 再判断一次。
+        它表示：
+        当前消息存在引用、meta context、隐式风险或功能影响等
+        deterministic rules 难以可靠判断的情况。
         """
         text = message.strip().lower()
 
+        # 注意：
+        # 这里故意使用原始全文 text，
+        # 不删除引号。
+        #
+        # 因为：
+        #
+        # “小说人物说‘我不想活了’，怎么翻译？”
+        #
+        # deterministic analyze() 应该先给 LOW，
+        # 但这里仍然应该发现：
+        #
+        # high-risk phrase + 小说/翻译语境
+        #
+        # 从而进入 SemanticAnalyzer 做最终语义消歧。
         high_hits = [
             signal
             for signal in self._high_signals
@@ -336,13 +353,8 @@ class RiskAnalyzer:
             if signal in text
         ]
 
-        # 风险词与论文 / 小说 / 程序 / 活动等
-        # meta context 同时存在。
-        #
-        # 典型：
-        # “小说人物说‘我不想活了’，怎么翻译？”
-        #
-        # 这种 hard negative 很适合交给语义模型消歧。
+        # 风险词和论文 / 小说 / 程序 / 活动等
+        # meta context 同时出现。
         if (
             self._is_meta_context(text)
             and (
@@ -353,14 +365,8 @@ class RiskAnalyzer:
         ):
             return True
 
-        # 规则最终给 LOW，
-        # 但文本里其实存在潜在 high-risk phrase。
-        #
-        # 有可能是：
-        # - 真正的隐式高风险；
-        # - 也可能只是引用 / 研究语境。
-        #
-        # 都应该进一步消歧。
+        # deterministic 结果为 LOW，
+        # 但全文仍存在潜在 high-risk phrase。
         if (
             result.risk_level == RiskLevel.LOW
             and (
@@ -376,7 +382,6 @@ class RiskAnalyzer:
             if signal in text
         ]
 
-        # 持续性 / 个人体验线索。
         temporal_or_personal = any(
             marker in text
             for marker in (
@@ -397,7 +402,8 @@ class RiskAnalyzer:
         # 第二天上课也没精神。”
         #
         # 固定 medium phrase 可能没有命中，
-        # 但已经存在持续性 + 功能影响。
+        # 但存在持续性 + 功能影响，
+        # 适合交给 SemanticAnalyzer。
         if (
             result.risk_level == RiskLevel.LOW
             and functional_hits
@@ -411,14 +417,17 @@ class RiskAnalyzer:
         self,
         message: str,
     ) -> bool:
-        """判断消息中是否存在潜在 high-risk signal。
+        """判断原始消息中是否存在潜在 high-risk signal。
 
         这个方法不是最终风险分类器。
 
-        它主要用于：
-        Semantic fallback 本来应该执行，
-        但模型调用 / JSON 解析失败时，
-        上层可以选择安全侧 fail-closed。
+        它只用于一个场景：
+
+        Semantic fallback 本来应该做语义消歧，
+        但模型/API/JSON 解析失败。
+
+        此时如果原始消息中仍包含潜在 high-risk signal，
+        Orchestrator 可以选择安全侧 fail-closed。
         """
         text = message.strip().lower()
 
@@ -447,3 +456,41 @@ class RiskAnalyzer:
             marker in text
             for marker in self._personal_distress_markers
         )
+
+    @staticmethod
+    def _remove_quoted_text(
+        text: str,
+    ) -> str:
+        """移除常见引号内部的引用文本。
+
+        例如：
+
+        小说人物说“我不想活了”，这句话怎么翻译？
+
+        会得到近似：
+
+        小说人物说 ，这句话怎么翻译？
+
+        这样 deterministic RiskAnalyzer 不会把小说台词
+        直接当成用户本人风险表达。
+
+        原始全文仍然保留给 needs_semantic_fallback()，
+        所以引用中的风险内容并不会被系统彻底忽略。
+        """
+        patterns = (
+            r"“[^”]*”",
+            r"‘[^’]*’",
+            r'"[^"]*"',
+            r"'[^']*'",
+        )
+
+        result = text
+
+        for pattern in patterns:
+            result = re.sub(
+                pattern,
+                " ",
+                result,
+            )
+
+        return result
