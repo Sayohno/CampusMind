@@ -1,13 +1,16 @@
-"""CampusMind IntentAnalyzer：加权意图信号 + 目标导向打分 + 最小必要上下文继承。
+"""CampusMind IntentAnalyzer：加权意图信号、目标导向打分与最小必要上下文继承。
 
-当前消息优先使用可解释的确定性信号识别业务目标；只有当前消息缺少明确
-业务信号且明显是 follow-up 时，才从 CaseState.topic 或最近用户消息继承意图。
+当前消息优先使用可解释的确定性信号识别业务目标。
 
-设计目标：
-1. 不再把所有关键词都视为同等重要；
-2. 区分“句子里提到了什么”与“用户当前想做什么”；
-3. 保留确定性、可测试和可解释性；
-4. 不改变既有 follow-up 上下文继承边界。
+只有在：
+1. 当前消息缺少明确业务信号；
+2. 并且明显属于 follow-up；
+
+这两个条件同时成立时，才允许从 CaseState.topic
+或最近用户消息中继承上一轮 Intent。
+
+此外，本模块会判断当前规则结果是否存在明显语义不确定性，
+供上层决定是否调用 SemanticAnalyzer 做 LLM 语义兜底。
 """
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ from core.schemas import ConversationMessage, IntentResult, IntentType
 
 
 class IntentAnalyzer:
+    # 不再把所有关键词都视为同等重要。
+    # value 越高，说明这个 phrase 对某个 Intent 的区分能力越强。
     _signals: dict[IntentType, dict[str, float]] = {
         IntentType.RESOURCE_QUERY: {
             "咨询中心": 2.0,
@@ -32,6 +37,7 @@ class IntentAnalyzer:
             "讲座": 1.0,
             "通知": 1.0,
         },
+
         IntentType.HUMAN_SUPPORT: {
             "找个人": 3.0,
             "真人": 3.0,
@@ -39,9 +45,14 @@ class IntentAnalyzer:
             "人工帮助": 3.0,
             "找人帮忙": 3.0,
             "真人帮忙": 3.0,
+
+            # “心理咨询师”本身并不一定代表用户正在寻求真人帮助。
+            # 例如“心理咨询师这个职业就业怎么样？”
+            # 因此这里权重较低。
             "心理咨询师": 0.8,
             "专业老师": 0.8,
         },
+
         IntentType.ACADEMIC_CAREER: {
             "秋招": 3.0,
             "简历": 3.0,
@@ -63,6 +74,7 @@ class IntentAnalyzer:
             "复习": 1.8,
             "毕业": 1.2,
         },
+
         IntentType.RELATIONSHIP: {
             "室友": 3.0,
             "同学": 1.8,
@@ -80,6 +92,7 @@ class IntentAnalyzer:
             "很僵": 1.4,
             "越来越僵": 1.8,
         },
+
         IntentType.EMOTIONAL_SUPPORT: {
             "难受": 2.2,
             "焦虑": 2.2,
@@ -100,6 +113,7 @@ class IntentAnalyzer:
             "胸口堵": 2.2,
             "状态很差": 1.8,
         },
+
         IntentType.GENERAL: {
             "你能做什么": 4.0,
             "介绍一下你": 3.0,
@@ -110,6 +124,7 @@ class IntentAnalyzer:
         },
     }
 
+    # “用户想做什么”比单纯出现某个主题词更重要。
     _resource_goal_markers = (
         "怎么预约",
         "如何预约",
@@ -162,6 +177,7 @@ class IntentAnalyzer:
         "和对方说",
     )
 
+    # 显式 tie-break，避免结果偷偷依赖 dict 声明顺序。
     _tie_priority = (
         IntentType.RESOURCE_QUERY,
         IntentType.HUMAN_SUPPORT,
@@ -196,23 +212,34 @@ class IntentAnalyzer:
     ) -> IntentResult:
         text = message.strip().lower()
 
-        # 1) 显式新意图永远优先。
+        # 1) 当前消息如果存在明确新意图，永远优先当前消息。
         current_intent, current_score = self._best_intent(text)
+
         if current_score > 0:
             return IntentResult(
                 intent=current_intent,
                 confidence=self._confidence(current_score),
             )
 
-        # 2) 当前句缺少业务信号且明显是 follow-up 时，才继承上下文。
+        # 2) 只有当前句没有业务信号，并且明显属于 follow-up，
+        #    才允许继承上一轮上下文。
         if self.is_follow_up(message):
-            inherited_from_case = self._intent_from_case_topic(case_topic)
-            if inherited_from_case is not None:
-                return IntentResult(intent=inherited_from_case, confidence=0.80)
-
-            inherited_from_memory = self._intent_from_recent_user_memory(
-                memory_history or []
+            inherited_from_case = self._intent_from_case_topic(
+                case_topic
             )
+
+            if inherited_from_case is not None:
+                return IntentResult(
+                    intent=inherited_from_case,
+                    confidence=0.80,
+                )
+
+            inherited_from_memory = (
+                self._intent_from_recent_user_memory(
+                    memory_history or []
+                )
+            )
+
             if inherited_from_memory is not None:
                 return IntentResult(
                     intent=inherited_from_memory,
@@ -227,27 +254,121 @@ class IntentAnalyzer:
 
     def is_follow_up(self, message: str) -> bool:
         text = message.strip().lower()
-        return any(marker in text for marker in self._follow_up_markers)
 
-    def _best_intent(self, text: str) -> tuple[IntentType, float]:
+        return any(
+            marker in text
+            for marker in self._follow_up_markers
+        )
+
+    def needs_semantic_fallback(
+        self,
+        message: str,
+        result: IntentResult,
+    ) -> bool:
+        """判断当前确定性 Intent 是否值得进入 LLM 语义兜底。
+
+        返回 True 不代表规则结果一定错误。
+
+        它只表示：
+        当前规则证据比较弱、存在冲突，或者没有识别到业务 Intent，
+        可以让 SemanticAnalyzer 再做一次语义理解。
+        """
+        text = message.strip().lower()
+
+        # follow-up 已经有专门的 CaseState / Memory 继承逻辑。
+        # 不要因为句子短就再次调用 LLM。
+        if self.is_follow_up(message):
+            return False
+
+        scores = self._score_intents(text)
+
+        ranked = sorted(
+            scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        # 完全没有业务信号而退回 General。
+        #
+        # 例如：
+        # “投出去很多份都没有回音，我不知道下一步怎么调整。”
+        #
+        # 人能理解它属于求职，但固定规则可能完全没命中。
+        if (
+            result.intent == IntentType.GENERAL
+            and result.confidence <= 0.60
+        ):
+            return True
+
+        positive = [
+            (intent, score)
+            for intent, score in ranked
+            if score > 0
+        ]
+
+        # 同时存在 General 任务信号和业务域信号。
+        #
+        # 例如：
+        # “帮朋友润色一篇关于绝望情绪的文章。”
+        #
+        # “润色”偏 General，
+        # “绝望 / 情绪”又像 EmotionalSupport，
+        # 此时适合做语义消歧。
+        general_score = scores.get(
+            IntentType.GENERAL,
+            0.0,
+        )
+
+        if (
+            general_score > 0
+            and any(
+                score > 0
+                for intent, score in scores.items()
+                if intent != IntentType.GENERAL
+            )
+        ):
+            return True
+
+        # 前两名得分很接近，说明规则无法形成明显优势。
+        if len(positive) >= 2:
+            margin = (
+                positive[0][1]
+                - positive[1][1]
+            )
+
+            if margin <= 1.5:
+                return True
+
+        return False
+
+    def _score_intents(
+        self,
+        text: str,
+    ) -> dict[IntentType, float]:
+        """计算各 Intent 的确定性规则得分。"""
         scores = {
             intent: 0.0
             for intent in self._signals
         }
 
-        # 第一层：主题/语义信号。
-        # 不同词具有不同区分能力，因此使用不同权重。
+        # 第一层：主题 / phrase 信号。
         for intent, signals in self._signals.items():
             for phrase, weight in signals.items():
                 if phrase in text:
                     scores[intent] += weight
 
-        # 第二层：用户当前目标。
-        # “在哪里 / 怎么报名”比单纯出现某个主题词更能体现 Resource Query。
-        if any(marker in text for marker in self._resource_goal_markers):
+        # 第二层：用户任务目标。
+
+        # “在哪里 / 怎么报名 / 联系方式”等
+        # 比单纯出现一个校园主题词更像 Resource Query。
+        if any(
+            marker in text
+            for marker in self._resource_goal_markers
+        ):
             scores[IntentType.RESOURCE_QUERY] += 2.0
 
-        # “有没有 + 校园资源实体”也是典型资源可用性查询。
+        # “有没有 + 校园资源实体”
+        # 通常属于资源可用性查询。
         if (
             "有没有" in text
             and any(
@@ -264,28 +385,49 @@ class IntentAnalyzer:
         ):
             scores[IntentType.RESOURCE_QUERY] += 2.0
 
-        # 求职/学业类目标动作。
-        if any(marker in text for marker in self._career_goal_markers):
+        # 求职 / 学业相关目标动作。
+        if any(
+            marker in text
+            for marker in self._career_goal_markers
+        ):
             scores[IntentType.ACADEMIC_CAREER] += 1.8
 
-        # 明确希望现实中的人介入。
-        # 基础词本身已经有较高权重，所以这里只做轻量 bonus。
-        if any(marker in text for marker in self._human_goal_markers):
+        # 明确希望真人介入。
+        if any(
+            marker in text
+            for marker in self._human_goal_markers
+        ):
             scores[IntentType.HUMAN_SUPPORT] += 0.2
 
         # 明确询问关系沟通方法。
-        if any(marker in text for marker in self._relationship_goal_markers):
+        if any(
+            marker in text
+            for marker in self._relationship_goal_markers
+        ):
             scores[IntentType.RELATIONSHIP] += 1.5
 
-        # 明确 tie-break，避免结果暗中依赖 dict 的声明顺序。
+        return scores
+
+    def _best_intent(
+        self,
+        text: str,
+    ) -> tuple[IntentType, float]:
+        scores = self._score_intents(text)
+
         best_intent = max(
             self._tie_priority,
             key=lambda intent: scores[intent],
         )
-        return best_intent, scores[best_intent]
+
+        return (
+            best_intent,
+            scores[best_intent],
+        )
 
     @staticmethod
-    def _confidence(score: float) -> float:
+    def _confidence(
+        score: float,
+    ) -> float:
         return min(
             0.66 + 0.06 * score,
             0.94,
@@ -303,13 +445,20 @@ class IntentAnalyzer:
         except ValueError:
             return None
 
-        return None if intent == IntentType.GENERAL else intent
+        return (
+            None
+            if intent == IntentType.GENERAL
+            else intent
+        )
 
     def _intent_from_recent_user_memory(
         self,
         memory_history: list[ConversationMessage],
     ) -> IntentType | None:
-        # 只使用用户历史，不让 assistant 生成文本反向污染路由。
+        # 只使用用户历史。
+        #
+        # 不使用 assistant 生成文本做路由证据，
+        # 防止模型自己生成的内容反过来污染 Intent。
         for item in reversed(memory_history):
             if item.role != "user":
                 continue
@@ -317,6 +466,7 @@ class IntentAnalyzer:
             intent, score = self._best_intent(
                 item.content.strip().lower()
             )
+
             if score > 0:
                 return intent
 
