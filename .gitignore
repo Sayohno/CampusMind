@@ -10,3 +10,6 @@ htmlcov/
 .DS_Store
 
 data/
+
+evaluation/report_dev.json
+evaluation/report_test.json
