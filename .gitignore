@@ -13,3 +13,10 @@ data/
 
 evaluation/report_dev.json
 evaluation/report_test.json
+
+
+# Generated evaluation reports
+evaluation/report_*.json
+
+# Local frozen evaluation package
+CampusMind_Holdout_Frozen.zip
