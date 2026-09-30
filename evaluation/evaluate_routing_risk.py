@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """CampusMind Routing / Risk evaluation.
 
-Supports two evaluation modes:
+支持两种模式：
 
-rules:
-    Only deterministic IntentAnalyzer + RiskAnalyzer.
+rules
+    仅使用确定性的 IntentAnalyzer
+    与 RiskAnalyzer。
 
-hybrid:
-    Deterministic fast path + LLM SemanticAnalyzer fallback.
+hybrid
+    使用 Rule Fast Path，
+    在需要时调用 LLM SemanticAnalyzer。
 
-This script evaluates only:
-- Intent
-- Risk
+该评测只覆盖：
+
+- Intent classification
+- Risk classification
 - Policy / Agent routing
 
-It does NOT run the selected Agent, Tool Calling Loop, RAG,
-or response generation, so evaluation does not waste extra LLM calls.
+不会真正执行 Agent、Tool Calling、
+RAG 或最终回答生成，因此不会产生
+与路由评测无关的额外 LLM 调用。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,31 +31,67 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parents[1]
+)
 
 if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
 
-from core.config import Settings, build_llm_client
-from core.intent_analyzer import IntentAnalyzer
-from core.risk_analyzer import RiskAnalyzer
-from core.risk_policy import RiskPolicyEngine
-from core.schemas import RiskAssessment, RiskLevel
-from core.semantic_analyzer import SemanticAnalyzer
-
-
-DATASET = (
-    PROJECT_ROOT
-    / "evaluation"
-    / "datasets"
-    / "routing_risk_v1.jsonl"
+from core.config import (
+    Settings,
+    build_llm_client,
+)
+from core.intent_analyzer import (
+    IntentAnalyzer,
+)
+from core.risk_analyzer import (
+    RiskAnalyzer,
+)
+from core.risk_policy import (
+    RiskPolicyEngine,
+)
+from core.schemas import (
+    RiskAssessment,
+    RiskLevel,
+)
+from core.semantic_analyzer import (
+    SemanticAnalyzer,
 )
 
 
-def load_cases(split: str):
-    rows = []
+DATASETS = {
+    "diagnostic": (
+        PROJECT_ROOT
+        / "evaluation"
+        / "datasets"
+        / "routing_risk_diagnostic.jsonl"
+    ),
+    "holdout": (
+        PROJECT_ROOT
+        / "evaluation"
+        / "datasets"
+        / "routing_risk_holdout.jsonl"
+    ),
+}
 
-    with DATASET.open(
+
+def load_cases(
+    dataset: str,
+    split: str,
+) -> list[dict]:
+    dataset_path = DATASETS[
+        dataset
+    ]
+
+    rows: list[dict] = []
+
+    with dataset_path.open(
         "r",
         encoding="utf-8",
     ) as file:
@@ -58,51 +99,65 @@ def load_cases(split: str):
             if not line.strip():
                 continue
 
-            row = json.loads(line)
+            row = json.loads(
+                line
+            )
 
             if (
                 split == "all"
-                or row["split"] == split
+                or row.get("split")
+                == split
             ):
-                rows.append(row)
+                rows.append(
+                    row
+                )
 
     return rows
 
 
 def macro_f1(
-    y_true,
-    y_pred,
-):
+    y_true: list[str],
+    y_pred: list[str],
+) -> tuple[
+    float,
+    dict[str, dict[str, float]],
+]:
     labels = sorted(
         set(y_true)
         | set(y_pred)
     )
 
-    scores = {}
+    scores: dict[
+        str,
+        dict[str, float],
+    ] = {}
 
     for label in labels:
         tp = sum(
-            t == label
-            and p == label
-            for t, p in zip(
+            true == label
+            and pred == label
+            for true, pred
+            in zip(
                 y_true,
                 y_pred,
             )
         )
 
         fp = sum(
-            t != label
-            and p == label
-            for t, p in zip(
+            true != label
+            and pred == label
+            for true, pred
+            in zip(
                 y_true,
                 y_pred,
             )
         )
 
         fn = sum(
-            t == label
-            and p != label
-            for t, p in zip(
+            true == label
+            and pred != label
+            for true, pred
+            in zip(
                 y_true,
                 y_pred,
             )
@@ -124,54 +179,79 @@ def macro_f1(
             2
             * precision
             * recall
-            / (precision + recall)
-            if precision + recall
+            / (
+                precision
+                + recall
+            )
+            if (
+                precision
+                + recall
+            )
             else 0.0
         )
 
         scores[label] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
+            "precision":
+                precision,
+            "recall":
+                recall,
+            "f1":
+                f1,
         }
 
     macro = (
         sum(
             item["f1"]
-            for item in scores.values()
+            for item
+            in scores.values()
         )
         / len(scores)
+        if scores
+        else 0.0
     )
 
-    return macro, scores
+    return (
+        macro,
+        scores,
+    )
 
 
 def binary_high_metrics(
-    y_true,
-    y_pred,
-):
+    y_true: list[str],
+    y_pred: list[str],
+) -> tuple[
+    float,
+    float,
+    float,
+    int,
+    int,
+    int,
+]:
     tp = sum(
-        t == "high"
-        and p == "high"
-        for t, p in zip(
+        true == "high"
+        and pred == "high"
+        for true, pred
+        in zip(
             y_true,
             y_pred,
         )
     )
 
     fp = sum(
-        t != "high"
-        and p == "high"
-        for t, p in zip(
+        true != "high"
+        and pred == "high"
+        for true, pred
+        in zip(
             y_true,
             y_pred,
         )
     )
 
     fn = sum(
-        t == "high"
-        and p != "high"
-        for t, p in zip(
+        true == "high"
+        and pred != "high"
+        for true, pred
+        in zip(
             y_true,
             y_pred,
         )
@@ -193,8 +273,14 @@ def binary_high_metrics(
         2
         * precision
         * recall
-        / (precision + recall)
-        if precision + recall
+        / (
+            precision
+            + recall
+        )
+        if (
+            precision
+            + recall
+        )
         else 0.0
     )
 
@@ -208,28 +294,45 @@ def binary_high_metrics(
     )
 
 
-def pct(value: float) -> str:
-    return f"{value * 100:.1f}%"
+def pct(
+    value: float,
+) -> str:
+    return (
+        f"{value * 100:.1f}%"
+    )
 
 
 async def evaluate_case_rules(
-    row,
+    row: dict,
     *,
-    intent_analyzer,
-    risk_analyzer,
-    policy_engine,
-):
-    intent = intent_analyzer.analyze(
-        row["message"]
+    intent_analyzer:
+        IntentAnalyzer,
+    risk_analyzer:
+        RiskAnalyzer,
+    policy_engine:
+        RiskPolicyEngine,
+) -> dict:
+    message = row[
+        "message"
+    ]
+
+    intent = (
+        intent_analyzer.analyze(
+            message
+        )
     )
 
-    risk = risk_analyzer.analyze(
-        row["message"]
+    risk = (
+        risk_analyzer.analyze(
+            message
+        )
     )
 
-    policy = policy_engine.decide(
-        intent,
-        risk,
+    policy = (
+        policy_engine.decide(
+            intent,
+            risk,
+        )
     )
 
     return {
@@ -240,39 +343,52 @@ async def evaluate_case_rules(
             risk.risk_level.value,
         "pred_agent":
             policy.allowed_agent.value,
-        "semantic_fallback": False,
-        "semantic_error": None,
+        "semantic_fallback":
+            False,
+        "semantic_error":
+            None,
     }
 
 
 async def evaluate_case_hybrid(
-    row,
+    row: dict,
     *,
-    intent_analyzer,
-    risk_analyzer,
-    semantic_analyzer,
-    policy_engine,
-):
-    message = row["message"]
+    intent_analyzer:
+        IntentAnalyzer,
+    risk_analyzer:
+        RiskAnalyzer,
+    semantic_analyzer:
+        SemanticAnalyzer,
+    policy_engine:
+        RiskPolicyEngine,
+) -> dict:
+    message = row[
+        "message"
+    ]
 
-    # 1) Deterministic fast path.
-    intent = intent_analyzer.analyze(
-        message
+    intent = (
+        intent_analyzer.analyze(
+            message
+        )
     )
 
-    risk = risk_analyzer.analyze(
-        message
+    risk = (
+        risk_analyzer.analyze(
+            message
+        )
     )
 
     intent_needs_semantic = (
-        intent_analyzer.needs_semantic_fallback(
+        intent_analyzer
+        .needs_semantic_fallback(
             message,
             intent,
         )
     )
 
     risk_needs_semantic = (
-        risk_analyzer.needs_semantic_fallback(
+        risk_analyzer
+        .needs_semantic_fallback(
             message,
             risk,
         )
@@ -281,8 +397,6 @@ async def evaluate_case_hybrid(
     semantic_used = False
     semantic_error = None
 
-    # 2) Only ambiguous/conflicting cases
-    #    enter LLM semantic fallback.
     if (
         intent_needs_semantic
         or risk_needs_semantic
@@ -291,7 +405,8 @@ async def evaluate_case_hybrid(
 
         try:
             semantic = (
-                await semantic_analyzer.analyze(
+                await
+                semantic_analyzer.analyze(
                     message
                 )
             )
@@ -302,10 +417,6 @@ async def evaluate_case_hybrid(
                 f"{str(exc)[:200]}"
             )
 
-            # Same safety behavior as Orchestrator:
-            # if semantic disambiguation fails while
-            # potential high-risk language exists,
-            # fail closed.
             if (
                 risk_needs_semantic
                 and risk_analyzer
@@ -313,18 +424,20 @@ async def evaluate_case_hybrid(
                     message
                 )
             ):
-                risk = RiskAssessment(
-                    risk_level=RiskLevel.HIGH,
-                    signals=[
-                        "semantic_fallback_failed",
-                        "potential_high_risk_signal",
-                    ],
-                    confidence=0.80,
+                risk = (
+                    RiskAssessment(
+                        risk_level=(
+                            RiskLevel.HIGH
+                        ),
+                        signals=[
+                            "semantic_fallback_failed",
+                            "potential_high_risk_signal",
+                        ],
+                        confidence=0.80,
+                    )
                 )
 
         else:
-            # Intent may be replaced only when
-            # the deterministic result was ambiguous.
             if (
                 intent_needs_semantic
                 and semantic
@@ -336,9 +449,6 @@ async def evaluate_case_hybrid(
                     semantic.intent_result
                 )
 
-            # Risk may be semantically corrected,
-            # but deterministic HIGH cannot be
-            # downgraded by the LLM.
             if (
                 risk_needs_semantic
                 and semantic
@@ -347,23 +457,28 @@ async def evaluate_case_hybrid(
                 >= 0.75
             ):
                 semantic_risk = (
-                    semantic.risk_assessment
+                    semantic
+                    .risk_assessment
                 )
 
-                if (
+                if not (
                     risk.risk_level
                     == RiskLevel.HIGH
-                    and semantic_risk.risk_level
-                    != RiskLevel.HIGH
+                    and (
+                        semantic_risk
+                        .risk_level
+                        != RiskLevel.HIGH
+                    )
                 ):
-                    pass
-                else:
-                    risk = semantic_risk
+                    risk = (
+                        semantic_risk
+                    )
 
-    # 3) Final deterministic policy decision.
-    policy = policy_engine.decide(
-        intent,
-        risk,
+    policy = (
+        policy_engine.decide(
+            intent,
+            risk,
+        )
     )
 
     return {
@@ -382,33 +497,54 @@ async def evaluate_case_hybrid(
 
 
 async def evaluate(
+    dataset: str,
     split: str,
     mode: str,
-):
-    rows = load_cases(split)
+) -> None:
+    rows = load_cases(
+        dataset,
+        split,
+    )
 
     if not rows:
         raise SystemExit(
-            f"No samples for split={split}"
+            "No samples for "
+            f"dataset={dataset}, "
+            f"split={split}"
         )
 
-    intent_analyzer = IntentAnalyzer()
-    risk_analyzer = RiskAnalyzer()
-    policy_engine = RiskPolicyEngine()
+    intent_analyzer = (
+        IntentAnalyzer()
+    )
+
+    risk_analyzer = (
+        RiskAnalyzer()
+    )
+
+    policy_engine = (
+        RiskPolicyEngine()
+    )
 
     semantic_analyzer = None
 
     if mode == "hybrid":
-        settings = Settings.from_env()
+        settings = (
+            Settings.from_env()
+        )
 
-        if settings.llm_mode != "real":
+        if (
+            settings.llm_mode
+            != "real"
+        ):
             raise SystemExit(
-                "Hybrid evaluation requires "
-                "LLM_MODE=real."
+                "Hybrid evaluation "
+                "requires LLM_MODE=real."
             )
 
-        llm_client = build_llm_client(
-            settings
+        llm_client = (
+            build_llm_client(
+                settings
+            )
         )
 
         semantic_analyzer = (
@@ -417,14 +553,15 @@ async def evaluate(
             )
         )
 
-    records = []
+    records: list[dict] = []
 
     for index, row in enumerate(
         rows,
         start=1,
     ):
         print(
-            f"[{index:03d}/{len(rows):03d}] "
+            f"[{index:03d}/"
+            f"{len(rows):03d}] "
             f"{row['id']} ... ",
             end="",
             flush=True,
@@ -432,33 +569,49 @@ async def evaluate(
 
         if mode == "rules":
             record = (
-                await evaluate_case_rules(
+                await
+                evaluate_case_rules(
                     row,
-                    intent_analyzer=
-                        intent_analyzer,
-                    risk_analyzer=
-                        risk_analyzer,
-                    policy_engine=
-                        policy_engine,
+                    intent_analyzer=(
+                        intent_analyzer
+                    ),
+                    risk_analyzer=(
+                        risk_analyzer
+                    ),
+                    policy_engine=(
+                        policy_engine
+                    ),
                 )
             )
 
         else:
+            assert (
+                semantic_analyzer
+                is not None
+            )
+
             record = (
-                await evaluate_case_hybrid(
+                await
+                evaluate_case_hybrid(
                     row,
-                    intent_analyzer=
-                        intent_analyzer,
-                    risk_analyzer=
-                        risk_analyzer,
-                    semantic_analyzer=
-                        semantic_analyzer,
-                    policy_engine=
-                        policy_engine,
+                    intent_analyzer=(
+                        intent_analyzer
+                    ),
+                    risk_analyzer=(
+                        risk_analyzer
+                    ),
+                    semantic_analyzer=(
+                        semantic_analyzer
+                    ),
+                    policy_engine=(
+                        policy_engine
+                    ),
                 )
             )
 
-        records.append(record)
+        records.append(
+            record
+        )
 
         fallback_text = (
             "semantic"
@@ -468,65 +621,82 @@ async def evaluate(
             else "rules"
         )
 
-        print(fallback_text)
+        print(
+            fallback_text
+        )
 
-    n = len(records)
+    sample_count = len(
+        records
+    )
 
-    intent_acc = (
+    intent_accuracy = (
         sum(
             row["pred_intent"]
-            == row["expected_intent"]
-            for row in records
+            == row[
+                "expected_intent"
+            ]
+            for row
+            in records
         )
-        / n
+        / sample_count
     )
 
-    risk_acc = (
+    risk_accuracy = (
         sum(
             row["pred_risk"]
-            == row["expected_risk"]
-            for row in records
+            == row[
+                "expected_risk"
+            ]
+            for row
+            in records
         )
-        / n
+        / sample_count
     )
 
-    route_acc = (
+    routing_accuracy = (
         sum(
             row["pred_agent"]
-            == row["expected_agent"]
-            for row in records
+            == row[
+                "expected_agent"
+            ]
+            for row
+            in records
         )
-        / n
+        / sample_count
     )
 
-    y_intent = [
+    expected_intents = [
         row["expected_intent"]
         for row in records
     ]
 
-    p_intent = [
+    predicted_intents = [
         row["pred_intent"]
         for row in records
     ]
 
-    y_risk = [
+    expected_risks = [
         row["expected_risk"]
         for row in records
     ]
 
-    p_risk = [
+    predicted_risks = [
         row["pred_risk"]
         for row in records
     ]
 
-    intent_macro, _ = macro_f1(
-        y_intent,
-        p_intent,
+    intent_macro_f1, _ = (
+        macro_f1(
+            expected_intents,
+            predicted_intents,
+        )
     )
 
-    risk_macro, _ = macro_f1(
-        y_risk,
-        p_risk,
+    risk_macro_f1, _ = (
+        macro_f1(
+            expected_risks,
+            predicted_risks,
+        )
     )
 
     (
@@ -537,12 +707,16 @@ async def evaluate(
         high_fp,
         high_fn,
     ) = binary_high_metrics(
-        y_risk,
-        p_risk,
+        expected_risks,
+        predicted_risks,
     )
 
     semantic_calls = sum(
-        row["semantic_fallback"]
+        bool(
+            row[
+                "semantic_fallback"
+            ]
+        )
         for row in records
     )
 
@@ -555,9 +729,15 @@ async def evaluate(
     print()
     print("=" * 70)
     print(
-        "CampusMind Routing & Risk Benchmark"
+        "CampusMind Routing & "
+        "Risk Benchmark"
     )
     print("=" * 70)
+
+    print(
+        f"Dataset                  : "
+        f"{dataset}"
+    )
 
     print(
         f"Mode                     : "
@@ -571,27 +751,27 @@ async def evaluate(
 
     print(
         f"Samples                  : "
-        f"{n}"
+        f"{sample_count}"
     )
 
     print(
         f"Intent Accuracy          : "
-        f"{pct(intent_acc)}"
+        f"{pct(intent_accuracy)}"
     )
 
     print(
         f"Intent Macro-F1          : "
-        f"{pct(intent_macro)}"
+        f"{pct(intent_macro_f1)}"
     )
 
     print(
         f"Risk Accuracy            : "
-        f"{pct(risk_acc)}"
+        f"{pct(risk_accuracy)}"
     )
 
     print(
         f"Risk Macro-F1            : "
-        f"{pct(risk_macro)}"
+        f"{pct(risk_macro_f1)}"
     )
 
     print(
@@ -618,13 +798,16 @@ async def evaluate(
 
     print(
         f"Agent Routing Accuracy   : "
-        f"{pct(route_acc)}"
+        f"{pct(routing_accuracy)}"
     )
 
     print(
         f"Semantic Fallback Calls  : "
-        f"{semantic_calls}/{n} "
-        f"({pct(semantic_calls / n)})"
+        f"{semantic_calls}/"
+        f"{sample_count} "
+        f"("
+        f"{pct(semantic_calls / sample_count)}"
+        f")"
     )
 
     print(
@@ -632,27 +815,39 @@ async def evaluate(
         f"{semantic_errors}"
     )
 
-    print("\nPer-category:")
+    print(
+        "\nPer-category:"
+    )
 
-    by_category = defaultdict(list)
+    by_category: dict[
+        str,
+        list[dict],
+    ] = defaultdict(list)
 
     for row in records:
         by_category[
             row["category"]
-        ].append(row)
+        ].append(
+            row
+        )
 
     for category in sorted(
         by_category
     ):
         items = (
-            by_category[category]
+            by_category[
+                category
+            ]
         )
 
         category_intent = (
             sum(
                 row["pred_intent"]
-                == row["expected_intent"]
-                for row in items
+                == row[
+                    "expected_intent"
+                ]
+                for row
+                in items
             )
             / len(items)
         )
@@ -660,8 +855,11 @@ async def evaluate(
         category_risk = (
             sum(
                 row["pred_risk"]
-                == row["expected_risk"]
-                for row in items
+                == row[
+                    "expected_risk"
+                ]
+                for row
+                in items
             )
             / len(items)
         )
@@ -669,8 +867,11 @@ async def evaluate(
         category_route = (
             sum(
                 row["pred_agent"]
-                == row["expected_agent"]
-                for row in items
+                == row[
+                    "expected_agent"
+                ]
+                for row
+                in items
             )
             / len(items)
         )
@@ -691,11 +892,17 @@ async def evaluate(
         for row in records
         if (
             row["pred_intent"]
-            != row["expected_intent"]
+            != row[
+                "expected_intent"
+            ]
             or row["pred_risk"]
-            != row["expected_risk"]
+            != row[
+                "expected_risk"
+            ]
             or row["pred_agent"]
-            != row["expected_agent"]
+            != row[
+                "expected_agent"
+            ]
         )
     ]
 
@@ -728,22 +935,27 @@ async def evaluate(
 
         if row["semantic_error"]:
             print(
-                f"  semantic_error: "
+                "  semantic_error: "
                 f"{row['semantic_error']}"
             )
 
     report = {
-        "mode": mode,
-        "split": split,
-        "samples": n,
+        "dataset":
+            dataset,
+        "mode":
+            mode,
+        "split":
+            split,
+        "samples":
+            sample_count,
         "intent_accuracy":
-            intent_acc,
+            intent_accuracy,
         "intent_macro_f1":
-            intent_macro,
+            intent_macro_f1,
         "risk_accuracy":
-            risk_acc,
+            risk_accuracy,
         "risk_macro_f1":
-            risk_macro,
+            risk_macro_f1,
         "high_risk_precision":
             high_precision,
         "high_risk_recall":
@@ -757,7 +969,7 @@ async def evaluate(
         "high_risk_fn":
             high_fn,
         "agent_routing_accuracy":
-            route_acc,
+            routing_accuracy,
         "semantic_fallback_calls":
             semantic_calls,
         "semantic_errors":
@@ -812,6 +1024,7 @@ async def evaluate(
         / "evaluation"
         / (
             f"report_"
+            f"{dataset}_"
             f"{mode}_"
             f"{split}.json"
         )
@@ -827,19 +1040,31 @@ async def evaluate(
     )
 
     print(
-        f"\nReport saved to: "
+        "\nReport saved to: "
         f"{report_path}"
     )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = (
+        argparse.ArgumentParser()
+    )
+
+    parser.add_argument(
+        "--dataset",
+        choices=[
+            "diagnostic",
+            "holdout",
+        ],
+        default="diagnostic",
+    )
 
     parser.add_argument(
         "--split",
         choices=[
             "dev",
             "test",
+            "holdout",
             "all",
         ],
         default="all",
@@ -854,10 +1079,13 @@ if __name__ == "__main__":
         default="rules",
     )
 
-    args = parser.parse_args()
+    args = (
+        parser.parse_args()
+    )
 
     asyncio.run(
         evaluate(
+            dataset=args.dataset,
             split=args.split,
             mode=args.mode,
         )
