@@ -1,0 +1,7 @@
+CampusMind Routing/Risk Hold-out
+Samples: 60
+SHA256: e98bbd7457f1faa86d523995788c310448ee534a4afe68b86d2246b5210b5a9a
+Categories: {'clear': 24, 'implicit': 12, 'cross_risk': 12, 'hard_negative': 12}
+Risk: {'low': 39, 'medium': 14, 'high': 7}
+Intent: {'academic_career': 14, 'emotional_support': 8, 'relationship': 8, 'resource_query': 10, 'human_support': 8, 'general': 12}
+Status: frozen before first evaluation run
