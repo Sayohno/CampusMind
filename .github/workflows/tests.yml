@@ -29,5 +29,5 @@ jobs:
           LLM_MODE: static
           STATE_BACKEND: in_memory
           TRACE_BACKEND: in_memory
-          RAG_BACKEND: memory
+          RAG_BACKEND: keyword
         run: python -m unittest discover -s tests -v
