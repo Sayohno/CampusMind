@@ -1,17 +1,9 @@
-"""CampusMind Agent 装配工厂。
-
-这里负责把 LLMClient、ToolRegistry、Prompt、Tool Scope 注入具体 Agent。
-Agent 自己不创建这些依赖。
-"""
+"""Build configured CampusMind agents."""
 from __future__ import annotations
 
-from agents.base_agent import (
-    EscalationAgent,
-    GeneralAgent,
-    GuidanceAgent,
-    ResourceAgent,
-    SupportAgent,
-)
+from dataclasses import dataclass
+
+from agents.base_agent import BaseAgent
 from agents.tools import ToolRegistry
 from core.llm_client import BaseLLMClient
 from core.schemas import AgentName
@@ -50,51 +42,37 @@ AGENT_PROMPTS: dict[AgentName, str] = {
 }
 
 
+@dataclass(frozen=True)
+class AgentConfig:
+    allowed_tools: frozenset[str]
+
+
+AGENT_CONFIGS: dict[AgentName, AgentConfig] = {
+    AgentName.GUIDANCE: AgentConfig(frozenset({"upsert_support_case"})),
+    AgentName.SUPPORT: AgentConfig(frozenset({"upsert_support_case"})),
+    AgentName.RESOURCE: AgentConfig(frozenset({"search_verified_resources"})),
+    AgentName.ESCALATION: AgentConfig(
+        frozenset({"upsert_support_case", "search_verified_resources"})
+    ),
+    AgentName.GENERAL: AgentConfig(frozenset()),
+}
+
+
 def build_agents(
     *,
     llm_client: BaseLLMClient,
     tool_registry: ToolRegistry,
-) -> dict[AgentName, GuidanceAgent | SupportAgent | ResourceAgent | EscalationAgent | GeneralAgent]:
-    """按最小权限原则装配各 Agent。
+) -> dict[AgentName, BaseAgent]:
+    """Create agents from prompt and tool-scope configuration."""
+    agents: dict[AgentName, BaseAgent] = {}
 
-    CaseState 已作为 AgentRequest 的结构化上下文注入，因此普通 Agent 不需要额外读取 Case。
-    ResourceAgent 只暴露检索 Tool；Guidance/Support 只在必要时写入任务状态；
-    EscalationAgent 保留高风险 mandatory tools 所需权限；GeneralAgent 不暴露 Tool。
-    """
-    return {
-        AgentName.GUIDANCE: GuidanceAgent(
-            name=AgentName.GUIDANCE,
-            system_prompt=AGENT_PROMPTS[AgentName.GUIDANCE],
+    for name, config in AGENT_CONFIGS.items():
+        agents[name] = BaseAgent(
+            name=name,
+            system_prompt=AGENT_PROMPTS[name],
             llm_client=llm_client,
             tool_registry=tool_registry,
-            allowed_tools={"upsert_support_case"},
-        ),
-        AgentName.SUPPORT: SupportAgent(
-            name=AgentName.SUPPORT,
-            system_prompt=AGENT_PROMPTS[AgentName.SUPPORT],
-            llm_client=llm_client,
-            tool_registry=tool_registry,
-            allowed_tools={"upsert_support_case"},
-        ),
-        AgentName.RESOURCE: ResourceAgent(
-            name=AgentName.RESOURCE,
-            system_prompt=AGENT_PROMPTS[AgentName.RESOURCE],
-            llm_client=llm_client,
-            tool_registry=tool_registry,
-            allowed_tools={"search_verified_resources"},
-        ),
-        AgentName.ESCALATION: EscalationAgent(
-            name=AgentName.ESCALATION,
-            system_prompt=AGENT_PROMPTS[AgentName.ESCALATION],
-            llm_client=llm_client,
-            tool_registry=tool_registry,
-            allowed_tools={"upsert_support_case", "search_verified_resources"},
-        ),
-        AgentName.GENERAL: GeneralAgent(
-            name=AgentName.GENERAL,
-            system_prompt=AGENT_PROMPTS[AgentName.GENERAL],
-            llm_client=llm_client,
-            tool_registry=tool_registry,
-            allowed_tools=set(),
-        ),
-    }
+            allowed_tools=set(config.allowed_tools),
+        )
+
+    return agents

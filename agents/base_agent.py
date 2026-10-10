@@ -1,4 +1,4 @@
-"""CampusMind BaseAgent 与 Agent Runtime Loop。"""
+"""Shared Agent runtime for CampusMind."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from core.schemas import AgentName, AgentRequest, AgentResult, ToolCall, ToolExe
 
 
 class BaseAgent:
-    """共享 Runtime + 不同 Role / Prompt / Tool Scope。"""
+    """Run one configured agent with a shared tool-calling runtime."""
 
     def __init__(
         self,
@@ -320,21 +320,10 @@ class BaseAgent:
         )
 
 
-class GuidanceAgent(BaseAgent):
-    pass
-
-
-class SupportAgent(BaseAgent):
-    pass
-
-
-class ResourceAgent(BaseAgent):
-    pass
-
-
-class EscalationAgent(BaseAgent):
-    pass
-
-
-class GeneralAgent(BaseAgent):
-    pass
+# Agent behavior is configuration-driven: role, prompt and tool scope are injected
+# by agents.factory. Keep these aliases for compatibility with existing imports.
+GuidanceAgent = BaseAgent
+SupportAgent = BaseAgent
+ResourceAgent = BaseAgent
+EscalationAgent = BaseAgent
+GeneralAgent = BaseAgent
