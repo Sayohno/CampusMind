@@ -1,108 +1,62 @@
 # CampusMind
 
-CampusMind 是一个面向高校学生学习、求职、情绪支持与校园资源查询场景的风险感知 Multi-Agent 系统。
+CampusMind 是一个面向高校学生学习、求职、情绪支持和校园资源查询场景的 Agent 后端项目。
 
-项目重点不是让 LLM 自由决定所有动作，而是将语义理解、风险策略、Agent 路由、工具执行和结果安全检查拆分为明确的工程边界：LLM 负责理解与生成，确定性的 PolicyEngine 和 Agent Runtime 负责权限与执行约束。
+项目重点不是让 LLM 自由决定所有动作，而是把“理解请求、判断风险、选择 Agent、执行工具、检查输出”拆成几个明确步骤。LLM 主要负责语义理解和生成，最终路由、工具权限和高风险处理由确定性代码约束。
 
-> 项目定位：Agent / LLM Application 工程实践项目。  
-> 系统面向非临床校园支持场景，不提供医疗诊断、真实报警或未经核验的学校联系方式。
+> 这是一个 Agent / LLM Application 工程实践项目，不提供医疗诊断、真实报警或未经核验的学校联系方式。
 
-## Features
+## 主要功能
 
-### Risk-aware Agent Routing
+### 1. Intent / Risk 路由
 
-基于 Intent / Risk 两个独立维度理解请求，由确定性的 `RiskPolicyEngine` 综合生成：
-
-- target Agent
-- autonomy level
-- mandatory actions
-- escalation policy
-
-系统通过 Thin Router 调度：
-
-- `GuidanceAgent`
-- `SupportAgent`
-- `ResourceAgent`
-- `EscalationAgent`
-- `GeneralAgent`
-
-高风险请求不会仅依赖 Prompt 约束，而是由程序强制进入 `EscalationAgent` 路径。
-
-针对纯规则 Analyzer 在隐式表达和 hard-negative 场景下的泛化不足，引入：
+请求先经过确定性 `IntentAnalyzer` 和 `RiskAnalyzer`。当规则结果存在明显歧义时，再调用 `SemanticAnalyzer` 做一次语义补充。
 
 ```text
 Rule Fast Path
       ↓
-Semantic Fallback
+Semantic Fallback（仅在需要时）
       ↓
-Deterministic PolicyEngine
+RiskPolicyEngine
+      ↓
+target Agent / mandatory tools / escalation
 ```
 
-Semantic Analyzer 只负责结构化 Intent / Risk 理解，最终 Agent 路由与安全权限仍由确定性代码控制。
+最终 Agent 路由和高风险升级仍由 `RiskPolicyEngine` 决定，Semantic Analyzer 不直接控制工具权限。
 
-在 60 条未参与调参的独立测试样本上：
+当前包含：
 
-- Agent Routing Accuracy：`66.7% → 86.7%`
-- High-Risk Recall：`71.4% → 100%`
+- `GuidanceAgent`：学习、求职和行动建议
+- `SupportAgent`：非临床情绪支持
+- `ResourceAgent`：校园资源查询
+- `EscalationAgent`：高风险受控路径
+- `GeneralAgent`：普通兜底
 
-详细评测方法与结果见 [`evaluation/`](./evaluation/)。
+### 2. Agent Runtime 与 Tool Calling
 
-### Agent Runtime & Tool Governance
+所有 Agent 共享同一套 Runtime。模型可以提出 Tool Call，但工具真正执行前会经过：
 
-实现统一 `Agent Runtime` 与 `ToolRegistry`，构建受控 Tool Calling Loop。
+- Tool Scope 检查
+- 参数 Schema 校验
+- 最大调用轮次限制
+- 重复调用去重
+- mandatory tools 强制执行
 
-LLM 可以提出 Tool Call，但不能直接执行工具。Runtime 会在真正执行前检查：
+这样可以把“模型提出动作”和“Python 真正执行动作”分开。
 
-- Tool Scope
-- Tool arguments
-- MAX_ROUNDS
-- duplicate calls
-- mandatory tools
+### 3. Redis 状态与上下文
 
-从而将：
+Redis 用于保存三类数据：
 
-```text
-LLM 动作决策
-```
+- Conversation Memory：近期对话历史
+- SupportCaseState：结构化任务状态
+- Trace：请求路由、工具执行和耗时等信息
 
-与：
+Conversation Memory 和 CaseState 分开管理，并使用不同 TTL。对于“继续刚才的问题”这类当前语义不完整的续问，会结合最近用户消息和 CaseState 恢复必要上下文。
 
-```text
-Python 实际执行
-```
+### 4. Verified Resource RAG
 
-分离。
-
-### State & Context
-
-使用 Redis 持久化：
-
-- Conversation Memory
-- SupportCaseState
-- Trace
-
-不同类型状态使用独立 TTL 管理生命周期。
-
-Conversation Memory 保存自然语言聊天历史；`SupportCaseState` 保存当前任务的结构化状态，两者职责分离。
-
-对于：
-
-```text
-学校心理咨询中心怎么预约？
-→ 我刚才问的事情继续说。
-```
-
-这类当前消息语义不完整的模糊续问，系统优先读取当前 CaseState topic，并结合最近用户消息恢复必要上下文，避免错误路由。
-
-显式的新意图始终优先，不会无条件继承历史 Intent。
-
-### Verified Resource RAG
-
-校园资源查询通过 ChromaDB 构建 Vector RAG。
-
-ResourceAgent 使用 `search_verified_resources` 查询经过验证的资源，并将检索结果作为 Evidence 提供给回答链路。
-
-系统遵循：
+校园资源查询通过 ChromaDB 检索经过验证的资源。
 
 ```text
 Verified Resource
@@ -116,199 +70,97 @@ Evidence
 ResourceAgent
 ```
 
-当证据不足时，不使用模型参数知识编造具体电话、地址或开放时间。
+具体地址、电话、开放时间等事实型信息只基于检索到的 Evidence 回答。证据不足时，系统不会用模型参数知识补齐。
 
-当前默认使用 `DeterministicHashEmbedder` 保证离线测试可复现，同时通过 `EmbeddingModel` 接口保留后续替换真实 Embedding 模型的能力。
+为了保证本地测试可复现，仓库默认使用 `DeterministicHashEmbedder`。Embedding 接口已经抽象，实际部署时可以替换为真实 Embedding 模型。
 
-### Safety Guard
+### 5. 输出安全与 SSE
 
-安全控制分为执行前、执行中和执行后三层：
+`ResponseGuard` 在 Agent 生成候选回答后做最终检查。若候选回答不满足当前风险策略或事实约束，则返回 Safe Fallback。
 
-```text
-Intent / Risk Analysis
-        ↓
-RiskPolicyEngine
-        ↓
-Agent Runtime
-        ↓
-Response Guard
-        ↓
-Safe Fallback
-```
-
-其中：
-
-- PolicyEngine 控制允许的 Agent 和 mandatory actions
-- Runtime 控制 Tool 权限与真实执行
-- Response Guard 检查最终输出
-- Safe Fallback 在高风险输出不满足要求时提供受控回复
-
-### Observability
-
-每次请求生成结构化 Trace，记录：
-
-- request / conversation
-- Intent
-- Risk
-- selected Agent
-- Tool executions
-- Guard result
-- latency
-- CaseState
-
-便于定位 Agent 路由、工具执行与安全链路中的问题。
-
-### SSE Demo
-
-提供 FastAPI SSE 接口：
+FastAPI 提供：
 
 ```text
+POST /chat
 POST /chat/stream
 ```
 
-事件包括：
-
-```text
-accepted
-stage
-meta
-chunk
-done
-```
-
-Vue 3 Demo 页面可以展示：
-
-- Intent
-- Risk
-- selected Agent
-- Tools
-- Guard
-- CaseState
-- final response
-
-当前 SSE 实现的是 Agent 执行状态事件和最终回答的增量展示，不宣称模型原始 token-level streaming。
+SSE 接口用于推送 Agent 执行阶段和最终回答增量展示。当前实现不是模型原始 token-level streaming。
 
 ---
 
-## Architecture
+## 请求链路
 
 ```text
-                     User Request
-                          │
-                          ▼
-                Intent / Risk Analysis
-                  │             │
-                  │      Semantic Fallback
-                  │       when necessary
-                  └─────────────┘
-                          │
-                          ▼
-                 RiskPolicyEngine
-                          │
-              ┌───────────┼───────────┐
-              │           │           │
-              ▼           ▼           ▼
-          target      autonomy    mandatory
-           Agent        level       actions
-              │
-              ▼
-                    Thin Router
-                          │
-                          ▼
-                    Agent Runtime
-                 ┌────────┴────────┐
-                 │                 │
-                 ▼                 ▼
-               LLM             ToolRegistry
-                                   │
-                      ┌────────────┴────────────┐
-                      ▼                         ▼
-                    Redis                    ChromaDB
-            Memory / CaseState / Trace        RAG
-                      │                         │
-                      └────────────┬────────────┘
-                                   ▼
-                             Agent Result
-                                   │
-                                   ▼
-                            Response Guard
-                                   │
-                        ┌──────────┴──────────┐
-                        ▼                     ▼
-                     Passed              Safe Fallback
-                        │                     │
-                        └──────────┬──────────┘
-                                   ▼
-                              JSON / SSE
+User Request
+    ↓
+Conversation Memory / CaseState
+    ↓
+IntentAnalyzer + RiskAnalyzer
+    ↓
+Semantic Fallback（按需）
+    ↓
+RiskPolicyEngine
+    ↓
+Thin Router
+    ↓
+Agent Runtime
+    ├── LLM
+    └── ToolRegistry
+          ├── Redis State
+          └── ChromaDB RAG
+    ↓
+ResponseGuard
+    ↓
+JSON / SSE
 ```
 
-## Agent Responsibilities
+## 评测
 
-| Agent | Responsibility | Tool Scope |
-| --- | --- | --- |
-| GuidanceAgent | 学业、求职与行动建议 | `upsert_support_case` |
-| SupportAgent | 非临床情绪支持与关系问题 | `upsert_support_case` |
-| ResourceAgent | 校园资源事实查询 | `search_verified_resources` |
-| EscalationAgent | 高风险受控处理路径 | Resource + Case tools |
-| GeneralAgent | 普通请求兜底 | No tools |
+路由与风险评测代码位于 `evaluation/`。
 
-## State & Storage
+Holdout 数据集在首次正式评测前冻结，共 60 条样本，覆盖：
 
-| Data | Backend | Purpose |
-| --- | --- | --- |
-| Conversation Memory | Redis List | 最近聊天上下文 |
-| SupportCaseState | Redis | 当前任务结构化状态 |
-| Trace | Redis | Agent 执行可观测记录 |
-| Resource Vector Index | ChromaDB | Verified Resource 检索 |
+- clear：24
+- implicit：12
+- cross_risk：12
+- hard_negative：12
 
-一句话：
+在同一批 60 条冻结样本上：
 
-> Redis 管状态，ChromaDB 管知识检索，PolicyEngine / Runtime 管执行权限。
+| Metric | Rules | Hybrid |
+| --- | ---: | ---: |
+| Agent Routing Accuracy | 66.7% (40/60) | 86.7% (52/60) |
+| Intent Accuracy | 66.7% | 83.3% |
+| Risk Accuracy | 83.3% | 86.7% |
 
-## Tech Stack
+其中 high-risk 样本共 7 条，Rules 识别 5/7，Hybrid 识别 7/7。
 
-- Python
-- FastAPI
-- Pydantic
+这些结果只代表当前自建测试集，不代表公开 Benchmark 或生产环境性能。详细口径、数据分布和运行方式见 [evaluation/README.md](./evaluation/README.md)。
+
+## 技术栈
+
+- Python / FastAPI / Pydantic
 - Redis
 - ChromaDB
-- Docker / Docker Compose
 - OpenAI-compatible LLM API
-- SSE
-- Vue 3
+- Docker / Docker Compose
+- SSE / Vue 3
 - unittest / FastAPI TestClient
 
-## Project Structure
+## 项目结构
 
 ```text
 CampusMind/
-├── agents/
-│   ├── agent_orchestrator.py
-│   ├── base_agent.py
-│   ├── factory.py
-│   └── tools.py
-├── core/
-│   ├── intent_analyzer.py
-│   ├── risk_analyzer.py
-│   ├── semantic_analyzer.py
-│   ├── risk_policy.py
-│   ├── llm_client.py
-│   ├── schemas.py
-│   └── config.py
-├── state/
-├── rag/
-├── safety/
-├── observability/
-├── evaluation/
-│   ├── README.md
-│   ├── evaluate_routing_risk.py
-│   └── datasets/
-│       ├── routing_risk_diagnostic.jsonl
-│       ├── routing_risk_holdout.jsonl
-│       └── holdout_manifest.txt
+├── agents/             # Agent Runtime、装配与 Tool Registry
+├── core/               # Intent / Risk / Policy / LLM Client
+├── state/              # Conversation Memory、CaseState
+├── rag/                # Embedding 接口与 ChromaDB 检索
+├── safety/             # Response Guard
+├── observability/      # Trace
+├── evaluation/         # 冻结测试集与评测脚本
 ├── tests/
 ├── web/
-│   └── index.html
 ├── docs/
 ├── main.py
 ├── Dockerfile
@@ -324,22 +176,20 @@ CampusMind/
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中配置真实模型参数。
-
-启动 Redis、ChromaDB 与 CampusMind：
+在 `.env` 中配置模型参数后启动：
 
 ```powershell
 docker compose build campusmind
 docker compose up -d
 ```
 
-检查服务：
+健康检查：
 
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8000/health" -Method Get
 ```
 
-打开 Demo：
+Demo：
 
 ```text
 http://localhost:8000/demo
@@ -357,32 +207,9 @@ http://localhost:8000/docs
 docker compose run --rm --no-deps campusmind python -m unittest discover -s tests -v
 ```
 
-## Evaluation
+## 当前边界
 
-Routing / Risk 评测代码与数据位于：
-
-```text
-evaluation/
-```
-
-支持纯规则与 Hybrid Analyzer 对照评测。
-
-详细说明见：
-
-[`evaluation/README.md`](./evaluation/README.md)
-
-## Design Principles
-
-CampusMind 的核心工程原则：
-
-```text
-LLM can propose.
-Policy decides.
-Runtime executes.
-Guard verifies.
-Trace records.
-```
-
-即：
-
-> 保留 LLM 的语义理解和生成能力，但不把系统最终执行权限完全交给模型。
+- 当前 high-risk 流程是受控 Agent 路径，不代表真实人工转介已经发生。
+- 默认 Embedding 为可复现的本地实现，不宣称具备生产级语义检索效果。
+- Redis、ChromaDB、LLM API 均按单机开发环境设计，未实现多节点高可用。
+- 路由与风险指标来自自建冻结测试集，仍需更大规模独立数据继续验证。
